@@ -130,3 +130,8 @@ async def parse_intent(req: ChatRequest):
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "AI 助手后端服务运行中"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
