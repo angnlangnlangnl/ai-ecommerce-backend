@@ -55,21 +55,39 @@ def save_products(products):
 products = load_products()
 
 def find_product(name: str):
+    """查找商品：精确匹配优先，其次模糊匹配，最后别名匹配"""
     if not name:
         return None
-    clean = name.replace(" ", "")
+    clean = name.replace(" ", "").strip()
+
+    # 1. 精确匹配
     for p in products:
-        if p["name"].replace(" ", "") in clean or clean in p["name"].replace(" ", ""):
+        if p["name"].replace(" ", "") == clean:
             return p
+
+    # 2. 模糊匹配（包含关系）
+    for p in products:
+        pn = p["name"].replace(" ", "")
+        if pn in clean or clean in pn:
+            return p
+
+    # 3. 别名匹配
     aliases = {
-        "茶叶": "茶叶", "礼盒": "茶叶", "竹编": "竹编", "核桃": "核桃",
-        "皂": "皂", "陶瓷": "陶瓷", "杯": "陶瓷", "折扇": "扇",
-        "扇": "扇", "姜茶": "姜茶", "红糖": "姜茶", "丝巾": "丝巾"
+        "茶叶": "茶叶", "礼盒": "茶叶",
+        "竹编": "竹编",
+        "核桃": "核桃",
+        "皂": "皂",
+        "陶瓷": "陶瓷", "杯": "陶瓷",
+        "折扇": "扇", "扇": "扇",
+        "姜茶": "姜茶", "红糖": "姜茶",
+        "丝巾": "丝巾",
+        "红茶": "红茶",
+        "茶": "茶"
     }
     for key, val in aliases.items():
         if key in clean:
             for p in products:
-                if val in p["name"]:
+                if val in p["name"] or val in p["category"]:
                     return p
     return None
 
@@ -77,7 +95,6 @@ def find_product(name: str):
 # AI 工具定义（25个）
 # ============================================================
 tools = [
-    # ===== 单商品操作（9个） =====
     {
         "type": "function",
         "function": {
@@ -203,7 +220,6 @@ tools = [
             }
         }
     },
-    # ===== 批量操作（6个） =====
     {
         "type": "function",
         "function": {
@@ -281,7 +297,6 @@ tools = [
             }
         }
     },
-    # ===== 新增 10 个 =====
     {
         "type": "function",
         "function": {
@@ -403,7 +418,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "search_product",
-            "description": "按关键词搜索商品。",
+            "description": "按关键词搜索商品，支持名字、分类、平台模糊匹配。",
             "parameters": {
                 "type": "object",
                 "properties": {"keyword": {"type": "string"}},
@@ -464,7 +479,7 @@ async def execute_action(req: ExecuteRequest):
     args = req.args
 
     try:
-        # ===== 原有 15 个 =====
+        # ===== 单商品操作 =====
         if t == "update_price":
             p = find_product(args.get("product_name"))
             if not p:
@@ -546,6 +561,7 @@ async def execute_action(req: ExecuteRequest):
             days = args.get("days", 7)
             return {"success": True, "message": f"已创建优惠券：满 {threshold} 减 {discount}，有效期 {days} 天"}
 
+        # ===== 批量操作 =====
         if t == "batch_take_off":
             category = args.get("category")
             matched = [p for p in products if p["category"] == category]
@@ -613,7 +629,7 @@ async def execute_action(req: ExecuteRequest):
             order_text = "从高到低" if order == "desc" else "从低到高"
             return {"success": True, "message": f"按销量{order_text}排序（前 {len(sorted_products)} 个）：\n" + "\n".join(lines)}
 
-        # ===== 新增 10 个 =====
+        # ===== 新增商品 / 删除 / 批量库存 =====
         if t == "add_product":
             name = args.get("name")
             price = args.get("price")
@@ -622,8 +638,8 @@ async def execute_action(req: ExecuteRequest):
             platform = args.get("platform", "淘宝")
             if not name or price is None:
                 return {"success": False, "message": "缺少商品名称或价格"}
-            # 检查重名
-            if find_product(name):
+            # 精确检查重名
+            if any(p["name"] == name for p in products):
                 return {"success": False, "message": f"商品「{name}」已存在"}
             new_id = max([p["id"] for p in products], default=0) + 1
             icon_map = {"茶叶": "fa-leaf", "手工艺": "fa-bag-shopping", "食品": "fa-seedling", "文创": "fa-palette"}
@@ -666,6 +682,7 @@ async def execute_action(req: ExecuteRequest):
             action_text = {"increase": "增加", "decrease": "减少", "set": "设置为"}.get(action, "调整")
             return {"success": True, "message": f"已将「{category}」分类商品库存统一{action_text} {amount} 件：\n" + "\n".join(lines)}
 
+        # ===== 查询 =====
         if t == "query_by_platform":
             platform = args.get("platform")
             matched = [p for p in products if p["platform"] == platform]
@@ -700,7 +717,8 @@ async def execute_action(req: ExecuteRequest):
             new_name = args.get("new_name")
             if not new_name:
                 return {"success": False, "message": "缺少新商品名称"}
-            if find_product(new_name):
+            # 精确检查重名
+            if any(prod["name"] == new_name for prod in products):
                 return {"success": False, "message": f"商品「{new_name}」已存在"}
             new_id = max([p["id"] for p in products], default=0) + 1
             new_product = dict(p)
@@ -723,8 +741,14 @@ async def execute_action(req: ExecuteRequest):
             return {"success": True, "message": f"共 {len(products)} 个商品，数据已可从前端 /api/products 接口获取"}
 
         if t == "search_product":
-            keyword = args.get("keyword", "")
-            matched = [p for p in products if keyword in p["name"] or keyword in p["category"]]
+            keyword = args.get("keyword", "").strip()
+            if not keyword:
+                return {"success": False, "message": "搜索关键词不能为空"}
+            # 多字段模糊匹配：名字、分类、平台
+            matched = [
+                p for p in products
+                if keyword in p["name"] or keyword in p["category"] or keyword in p.get("platform", "")
+            ]
             if not matched:
                 return {"success": True, "message": f"没有找到包含「{keyword}」的商品"}
             lines = [f"· {p['name']}（{p['category']}）：¥{p['price']}，库存 {p['stock']}" for p in matched]
