@@ -32,24 +32,29 @@ LOG_FILE = "logs.json"
 LOG_MAX = 1000
 
 # ============================================================
-# 商品数据
+# 商品数据（新增 main_image 和 sub_images 字段）
 # ============================================================
 DEFAULT_PRODUCTS = [
-    {"id": 1, "name": "云山茶叶礼盒", "price": 128, "stock": 234, "category": "茶叶", "platform": "抖音", "status": "在售", "sales": 1247, "icon": "fa-leaf"},
-    {"id": 2, "name": "手工竹编包", "price": 89, "stock": 247, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 856, "icon": "fa-bag-shopping"},
-    {"id": 3, "name": "山核桃仁 250g", "price": 45, "stock": 156, "category": "食品", "platform": "拼多多", "status": "在售", "sales": 2345, "icon": "fa-seedling"},
-    {"id": 4, "name": "云山手工皂套装", "price": 79, "stock": 89, "category": "文创", "platform": "京东", "status": "在售", "sales": 567, "icon": "fa-soap"},
-    {"id": 5, "name": "云山陶瓷杯", "price": 58, "stock": 143, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 1876, "icon": "fa-mug-saucer"},
-    {"id": 6, "name": "手写书法折扇", "price": 35, "stock": 0, "category": "文创", "platform": "抖音", "status": "下架", "sales": 234, "icon": "fa-scroll"},
-    {"id": 7, "name": "手工红糖姜茶", "price": 29.9, "stock": 210, "category": "食品", "platform": "淘宝", "status": "在售", "sales": 3456, "icon": "fa-candy-cane"},
-    {"id": 8, "name": "云山国风丝巾", "price": 68, "stock": 76, "category": "文创", "platform": "拼多多", "status": "在售", "sales": 789, "icon": "fa-palette"},
+    {"id": 1, "name": "云山茶叶礼盒", "price": 128, "stock": 234, "category": "茶叶", "platform": "抖音", "status": "在售", "sales": 1247, "icon": "fa-leaf", "main_image": "", "sub_images": []},
+    {"id": 2, "name": "手工竹编包", "price": 89, "stock": 247, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 856, "icon": "fa-bag-shopping", "main_image": "", "sub_images": []},
+    {"id": 3, "name": "山核桃仁 250g", "price": 45, "stock": 156, "category": "食品", "platform": "拼多多", "status": "在售", "sales": 2345, "icon": "fa-seedling", "main_image": "", "sub_images": []},
+    {"id": 4, "name": "云山手工皂套装", "price": 79, "stock": 89, "category": "文创", "platform": "京东", "status": "在售", "sales": 567, "icon": "fa-soap", "main_image": "", "sub_images": []},
+    {"id": 5, "name": "云山陶瓷杯", "price": 58, "stock": 143, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 1876, "icon": "fa-mug-saucer", "main_image": "", "sub_images": []},
+    {"id": 6, "name": "手写书法折扇", "price": 35, "stock": 0, "category": "文创", "platform": "抖音", "status": "下架", "sales": 234, "icon": "fa-scroll", "main_image": "", "sub_images": []},
+    {"id": 7, "name": "手工红糖姜茶", "price": 29.9, "stock": 210, "category": "食品", "platform": "淘宝", "status": "在售", "sales": 3456, "icon": "fa-candy-cane", "main_image": "", "sub_images": []},
+    {"id": 8, "name": "云山国风丝巾", "price": 68, "stock": 76, "category": "文创", "platform": "拼多多", "status": "在售", "sales": 789, "icon": "fa-palette", "main_image": "", "sub_images": []},
 ]
 
 def load_products():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                # 兼容旧数据：补全新字段
+                for p in data:
+                    p.setdefault("main_image", "")
+                    p.setdefault("sub_images", [])
+                return data
         except Exception:
             return DEFAULT_PRODUCTS
     return DEFAULT_PRODUCTS
@@ -89,6 +94,9 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "duplicate_product": "复制商品", "query_by_category": "按分类查询", "export_products": "导出数据",
         "search_product": "关键词搜索", "batch_delete_by_category": "批量删除",
         "query_restock_alert": "库存预警", "export_to_excel": "导出CSV",
+        "set_main_image": "设置主图", "remove_main_image": "删除主图",
+        "add_sub_image": "添加副图", "remove_sub_image": "删除副图",
+        "clear_sub_images": "清空副图", "query_images": "查看图片",
     }
     logs = load_logs()
     log_entry = {
@@ -103,10 +111,8 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
     logs.insert(0, log_entry)
     save_logs(logs)
 
-logs_store = load_logs()
-
 # ============================================================
-# 查找商品：精确优先
+# 查找商品
 # ============================================================
 def find_product(name: str):
     if not name:
@@ -132,13 +138,14 @@ def find_product(name: str):
     return None
 
 # ============================================================
-# AI 工具（28个）
+# AI 工具（34个）
 # ============================================================
 tools = [
-    {"type": "function", "function": {"name": "update_price", "description": "修改指定商品的价格。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "new_price": {"type": "number"}}, "required": ["product_name", "new_price"]}}},
+    # ===== 原有 28 个 =====
+    {"type": "function", "function": {"name": "update_price", "description": "修改商品价格。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "new_price": {"type": "number"}}, "required": ["product_name", "new_price"]}}},
     {"type": "function", "function": {"name": "update_stock", "description": "修改库存。action: increase/decrease/set。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "action": {"type": "string", "enum": ["increase", "decrease", "set"]}, "amount": {"type": "integer"}}, "required": ["product_name", "action", "amount"]}}},
-    {"type": "function", "function": {"name": "query_low_stock", "description": "查询库存低于阈值的商品。", "parameters": {"type": "object", "properties": {"threshold": {"type": "integer"}}, "required": ["threshold"]}}},
-    {"type": "function", "function": {"name": "publish_to_platforms", "description": "把商品上架到多个平台。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "platforms": {"type": "array", "items": {"type": "string"}}}, "required": ["product_name", "platforms"]}}},
+    {"type": "function", "function": {"name": "query_low_stock", "description": "查询低库存商品。", "parameters": {"type": "object", "properties": {"threshold": {"type": "integer"}}, "required": ["threshold"]}}},
+    {"type": "function", "function": {"name": "publish_to_platforms", "description": "多平台上架。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "platforms": {"type": "array", "items": {"type": "string"}}}, "required": ["product_name", "platforms"]}}},
     {"type": "function", "function": {"name": "update_title", "description": "修改商品标题。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "new_title": {"type": "string"}}, "required": ["product_name", "new_title"]}}},
     {"type": "function", "function": {"name": "take_off_shelf", "description": "下架单个商品。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
     {"type": "function", "function": {"name": "put_on_shelf", "description": "上架单个商品。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
@@ -146,13 +153,13 @@ tools = [
     {"type": "function", "function": {"name": "create_coupon", "description": "创建优惠券。", "parameters": {"type": "object", "properties": {"threshold": {"type": "integer"}, "discount": {"type": "integer"}, "days": {"type": "integer"}}, "required": ["threshold", "discount"]}}},
     {"type": "function", "function": {"name": "batch_take_off", "description": "批量下架分类商品。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}}},
     {"type": "function", "function": {"name": "batch_update_price", "description": "批量调价。adjust_type: percent/fixed。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}, "adjust_type": {"type": "string", "enum": ["percent", "fixed"]}, "adjust_value": {"type": "number"}}, "required": ["category", "adjust_type", "adjust_value"]}}},
-    {"type": "function", "function": {"name": "query_by_price_range", "description": "查询价格区间商品。", "parameters": {"type": "object", "properties": {"min_price": {"type": "number"}, "max_price": {"type": "number"}}, "required": ["min_price", "max_price"]}}},
-    {"type": "function", "function": {"name": "batch_take_off_zero_stock", "description": "下架所有零库存商品。", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "query_by_price_range", "description": "价格区间查询。", "parameters": {"type": "object", "properties": {"min_price": {"type": "number"}, "max_price": {"type": "number"}}, "required": ["min_price", "max_price"]}}},
+    {"type": "function", "function": {"name": "batch_take_off_zero_stock", "description": "下架零库存商品。", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "batch_markup_all", "description": "全店加价百分比。", "parameters": {"type": "object", "properties": {"percent": {"type": "number"}}, "required": ["percent"]}}},
     {"type": "function", "function": {"name": "query_sort_by_sales", "description": "按销量排序。", "parameters": {"type": "object", "properties": {"order": {"type": "string", "enum": ["desc", "asc"]}, "limit": {"type": "integer"}}}}},
     {"type": "function", "function": {"name": "add_product", "description": "新增商品。", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "price": {"type": "number"}, "stock": {"type": "integer"}, "category": {"type": "string"}, "platform": {"type": "string"}}, "required": ["name", "price"]}}},
     {"type": "function", "function": {"name": "delete_product", "description": "删除单个商品。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
-    {"type": "function", "function": {"name": "batch_update_stock", "description": "批量改库存。action: increase/decrease/set。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}, "action": {"type": "string", "enum": ["increase", "decrease", "set"]}, "amount": {"type": "integer"}}, "required": ["category", "action", "amount"]}}},
+    {"type": "function", "function": {"name": "batch_update_stock", "description": "批量改库存。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}, "action": {"type": "string", "enum": ["increase", "decrease", "set"]}, "amount": {"type": "integer"}}, "required": ["category", "action", "amount"]}}},
     {"type": "function", "function": {"name": "query_by_platform", "description": "按平台查询。", "parameters": {"type": "object", "properties": {"platform": {"type": "string"}}, "required": ["platform"]}}},
     {"type": "function", "function": {"name": "query_by_status", "description": "按状态查询。", "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["在售", "下架", "待审核"]}}, "required": ["status"]}}},
     {"type": "function", "function": {"name": "batch_put_on_shelf", "description": "批量上架分类商品。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}}},
@@ -160,10 +167,16 @@ tools = [
     {"type": "function", "function": {"name": "query_by_category", "description": "按分类查询。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}}},
     {"type": "function", "function": {"name": "export_products", "description": "导出商品数据。", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "search_product", "description": "按关键词搜索商品。", "parameters": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}}},
-    # ===== 新增 3 个 =====
-    {"type": "function", "function": {"name": "batch_delete_by_category", "description": "批量删除某个分类的所有商品。当用户说'删除所有XX类商品'时调用。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}}},
-    {"type": "function", "function": {"name": "query_restock_alert", "description": "查询需要补货的商品（库存低于预警值）。", "parameters": {"type": "object", "properties": {"threshold": {"type": "integer", "description": "库存预警阈值，默认50"}}}}},
-    {"type": "function", "function": {"name": "export_to_excel", "description": "导出所有商品数据为CSV格式。", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "batch_delete_by_category", "description": "批量删除分类商品。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}}},
+    {"type": "function", "function": {"name": "query_restock_alert", "description": "库存预警查询。", "parameters": {"type": "object", "properties": {"threshold": {"type": "integer"}}}}},
+    {"type": "function", "function": {"name": "export_to_excel", "description": "导出CSV。", "parameters": {"type": "object", "properties": {}}}},
+    # ===== 新增 6 个图片工具 =====
+    {"type": "function", "function": {"name": "set_main_image", "description": "设置商品主图。当用户说'把XX的主图换成YY'时调用。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "image_url": {"type": "string", "description": "图片URL"}}, "required": ["product_name", "image_url"]}}},
+    {"type": "function", "function": {"name": "remove_main_image", "description": "删除商品主图。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
+    {"type": "function", "function": {"name": "add_sub_image", "description": "给商品添加副图。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "image_url": {"type": "string"}}, "required": ["product_name", "image_url"]}}},
+    {"type": "function", "function": {"name": "remove_sub_image", "description": "删除商品指定序号的副图（从1开始）。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "index": {"type": "integer", "description": "副图序号，从1开始"}}, "required": ["product_name", "index"]}}},
+    {"type": "function", "function": {"name": "clear_sub_images", "description": "清空商品所有副图。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
+    {"type": "function", "function": {"name": "query_images", "description": "查看商品的所有图片。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
 ]
 
 class ChatRequest(BaseModel):
@@ -202,8 +215,7 @@ async def get_products():
 
 @app.get("/api/logs")
 async def get_logs():
-    logs = load_logs()
-    return {"logs": logs}
+    return {"logs": load_logs()}
 
 class ExecuteRequest(BaseModel):
     type: str
@@ -214,7 +226,6 @@ async def execute_action(req: ExecuteRequest):
     global products
     t = req.type
     args = req.args
-
     try:
         result = do_action(t, args)
         add_log(t, args, result.get("message", ""), result.get("success", False))
@@ -225,25 +236,90 @@ async def execute_action(req: ExecuteRequest):
         return {"success": False, "message": msg}
 
 def do_action(t, args):
-    """执行实际操作，返回 {success, message}"""
-
-    # ===== 单商品 =====
-    if t == "update_price":
+    # ===== 图片操作 =====
+    if t == "set_main_image":
         p = find_product(args.get("product_name"))
         if not p:
             return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
-        old = p["price"]
-        p["price"] = args["new_price"]
+        url = args.get("image_url", "").strip()
+        if not url:
+            return {"success": False, "message": "图片URL不能为空"}
+        p["main_image"] = url
         save_products(products)
+        return {"success": True, "message": f"已设置「{p['name']}」的主图"}
+
+    if t == "remove_main_image":
+        p = find_product(args.get("product_name"))
+        if not p:
+            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        if not p.get("main_image"):
+            return {"success": False, "message": f"「{p['name']}」没有主图"}
+        p["main_image"] = ""
+        save_products(products)
+        return {"success": True, "message": f"已删除「{p['name']}」的主图"}
+
+    if t == "add_sub_image":
+        p = find_product(args.get("product_name"))
+        if not p:
+            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        url = args.get("image_url", "").strip()
+        if not url:
+            return {"success": False, "message": "图片URL不能为空"}
+        subs = p.get("sub_images", [])
+        if len(subs) >= 5:
+            return {"success": False, "message": f"「{p['name']}」的副图已达上限（5张）"}
+        subs.append(url)
+        p["sub_images"] = subs
+        save_products(products)
+        return {"success": True, "message": f"已给「{p['name']}」添加第 {len(subs)} 张副图"}
+
+    if t == "remove_sub_image":
+        p = find_product(args.get("product_name"))
+        if not p:
+            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        subs = p.get("sub_images", [])
+        idx = args.get("index", 0)
+        if idx < 1 or idx > len(subs):
+            return {"success": False, "message": f"副图序号 {idx} 无效，当前共 {len(subs)} 张"}
+        subs.pop(idx - 1)
+        p["sub_images"] = subs
+        save_products(products)
+        return {"success": True, "message": f"已删除「{p['name']}」的第 {idx} 张副图，剩余 {len(subs)} 张"}
+
+    if t == "clear_sub_images":
+        p = find_product(args.get("product_name"))
+        if not p:
+            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        count = len(p.get("sub_images", []))
+        p["sub_images"] = []
+        save_products(products)
+        return {"success": True, "message": f"已清空「{p['name']}」的 {count} 张副图"}
+
+    if t == "query_images":
+        p = find_product(args.get("product_name"))
+        if not p:
+            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        main = p.get("main_image", "")
+        subs = p.get("sub_images", [])
+        lines = [f"商品：{p['name']}"]
+        lines.append(f"主图：{'有' if main else '无'}")
+        lines.append(f"副图：{len(subs)} 张")
+        if subs:
+            for i, s in enumerate(subs, 1):
+                lines.append(f"  {i}. {s[:60]}{'...' if len(s) > 60 else ''}")
+        return {"success": True, "message": "\n".join(lines)}
+
+    # ===== 原有逻辑（28个）=====
+    if t == "update_price":
+        p = find_product(args.get("product_name"))
+        if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        old = p["price"]; p["price"] = args["new_price"]; save_products(products)
         return {"success": True, "message": f"已将「{p['name']}」的价格从 ¥{old} 改为 ¥{p['price']}"}
 
     if t == "update_stock":
         p = find_product(args.get("product_name"))
-        if not p:
-            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
-        old = p["stock"]
-        action = args.get("action")
-        amount = args.get("amount", 0)
+        if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        old = p["stock"]; action = args.get("action"); amount = args.get("amount", 0)
         if action == "increase": p["stock"] = old + amount
         elif action == "decrease": p["stock"] = max(0, old - amount)
         else: p["stock"] = amount
@@ -254,76 +330,57 @@ def do_action(t, args):
     if t == "query_low_stock":
         threshold = args.get("threshold", 50)
         low = [p for p in products if p["stock"] < threshold]
-        if not low:
-            return {"success": True, "message": f"没有库存低于 {threshold} 件的商品"}
+        if not low: return {"success": True, "message": f"没有库存低于 {threshold} 件的商品"}
         lines = [f"· {p['name']}：库存 {p['stock']} 件" for p in low]
         return {"success": True, "message": f"库存低于 {threshold} 件的商品共 {len(low)} 个：\n" + "\n".join(lines)}
 
     if t == "publish_to_platforms":
         p = find_product(args.get("product_name"))
-        if not p:
-            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
         platforms = args.get("platforms", [])
         p["platform"] = platforms[0] if platforms else p["platform"]
-        p["status"] = "在售"
-        save_products(products)
+        p["status"] = "在售"; save_products(products)
         return {"success": True, "message": f"已将「{p['name']}」上架到 {', '.join(platforms)}"}
 
     if t == "update_title":
         p = find_product(args.get("product_name"))
-        if not p:
-            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
-        old = p["name"]
-        p["name"] = args["new_title"]
-        save_products(products)
+        if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        old = p["name"]; p["name"] = args["new_title"]; save_products(products)
         return {"success": True, "message": f"已将「{old}」的标题改为「{p['name']}」"}
 
     if t == "take_off_shelf":
         p = find_product(args.get("product_name"))
-        if not p:
-            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
-        p["status"] = "下架"
-        save_products(products)
+        if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        p["status"] = "下架"; save_products(products)
         return {"success": True, "message": f"已下架「{p['name']}」"}
 
     if t == "put_on_shelf":
         p = find_product(args.get("product_name"))
-        if not p:
-            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
-        p["status"] = "在售"
-        save_products(products)
+        if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        p["status"] = "在售"; save_products(products)
         return {"success": True, "message": f"已上架「{p['name']}」"}
 
     if t == "query_sales":
         p = find_product(args.get("product_name"))
-        if not p:
-            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
         return {"success": True, "message": f"「{p['name']}」累计销量 {p['sales']} 件，当前价格 ¥{p['price']}，库存 {p['stock']} 件"}
 
     if t == "create_coupon":
-        threshold = args.get("threshold")
-        discount = args.get("discount")
-        days = args.get("days", 7)
-        return {"success": True, "message": f"已创建优惠券：满 {threshold} 减 {discount}，有效期 {days} 天"}
+        return {"success": True, "message": f"已创建优惠券：满 {args.get('threshold')} 减 {args.get('discount')}，有效期 {args.get('days', 7)} 天"}
 
-    # ===== 批量 =====
     if t == "batch_take_off":
         category = args.get("category")
         matched = [p for p in products if p["category"] == category]
-        if not matched:
-            return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
+        if not matched: return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
         for p in matched: p["status"] = "下架"
         save_products(products)
         names = "、".join([p["name"] for p in matched])
         return {"success": True, "message": f"已批量下架「{category}」分类共 {len(matched)} 个商品：\n{names}"}
 
     if t == "batch_update_price":
-        category = args.get("category")
-        adjust_type = args.get("adjust_type", "percent")
-        adjust_value = args.get("adjust_value", 0)
+        category = args.get("category"); adjust_type = args.get("adjust_type", "percent"); adjust_value = args.get("adjust_value", 0)
         matched = [p for p in products if p["category"] == category]
-        if not matched:
-            return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
+        if not matched: return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
         lines = []
         for p in matched:
             old = p["price"]
@@ -335,74 +392,56 @@ def do_action(t, args):
         return {"success": True, "message": f"已将「{category}」分类商品价格统一调整（{action_text}）：\n" + "\n".join(lines)}
 
     if t == "query_by_price_range":
-        min_p = args.get("min_price", 0)
-        max_p = args.get("max_price", 99999)
+        min_p = args.get("min_price", 0); max_p = args.get("max_price", 99999)
         matched = [p for p in products if min_p <= p["price"] <= max_p]
-        if not matched:
-            return {"success": True, "message": f"没有价格在 ¥{min_p} - ¥{max_p} 之间的商品"}
+        if not matched: return {"success": True, "message": f"没有价格在 ¥{min_p} - ¥{max_p} 之间的商品"}
         lines = [f"· {p['name']}：¥{p['price']}（库存 {p['stock']}）" for p in matched]
         return {"success": True, "message": f"价格在 ¥{min_p} - ¥{max_p} 之间的商品共 {len(matched)} 个：\n" + "\n".join(lines)}
 
     if t == "batch_take_off_zero_stock":
         matched = [p for p in products if p["stock"] == 0]
-        if not matched:
-            return {"success": True, "message": "没有库存为 0 的商品"}
+        if not matched: return {"success": True, "message": "没有库存为 0 的商品"}
         for p in matched: p["status"] = "下架"
         save_products(products)
         names = "、".join([p["name"] for p in matched])
         return {"success": True, "message": f"已下架库存为 0 的商品共 {len(matched)} 个：\n{names}"}
 
     if t == "batch_markup_all":
-        percent = args.get("percent", 10)
-        lines = []
+        percent = args.get("percent", 10); lines = []
         for p in products:
-            old = p["price"]
-            p["price"] = round(old * (1 + percent / 100), 2)
+            old = p["price"]; p["price"] = round(old * (1 + percent / 100), 2)
             lines.append(f"· {p['name']}：¥{old} → ¥{p['price']}")
         save_products(products)
         return {"success": True, "message": f"已给所有商品加价 {percent}%：\n" + "\n".join(lines)}
 
     if t == "query_sort_by_sales":
-        order = args.get("order", "desc")
-        limit = args.get("limit", 10)
+        order = args.get("order", "desc"); limit = args.get("limit", 10)
         sorted_products = sorted(products, key=lambda p: p["sales"], reverse=(order == "desc"))[:limit]
         lines = [f"{i+1}. {p['name']}：销量 {p['sales']} 件" for i, p in enumerate(sorted_products)]
         order_text = "从高到低" if order == "desc" else "从低到高"
         return {"success": True, "message": f"按销量{order_text}排序（前 {len(sorted_products)} 个）：\n" + "\n".join(lines)}
 
     if t == "add_product":
-        name = args.get("name")
-        price = args.get("price")
-        stock = args.get("stock", 0)
-        category = args.get("category", "文创")
-        platform = args.get("platform", "淘宝")
-        if not name or price is None:
-            return {"success": False, "message": "缺少商品名称或价格"}
-        if any(p["name"] == name for p in products):
-            return {"success": False, "message": f"商品「{name}」已存在"}
+        name = args.get("name"); price = args.get("price"); stock = args.get("stock", 0)
+        category = args.get("category", "文创"); platform = args.get("platform", "淘宝")
+        if not name or price is None: return {"success": False, "message": "缺少商品名称或价格"}
+        if any(p["name"] == name for p in products): return {"success": False, "message": f"商品「{name}」已存在"}
         new_id = max([p["id"] for p in products], default=0) + 1
         icon_map = {"茶叶": "fa-leaf", "手工艺": "fa-bag-shopping", "食品": "fa-seedling", "文创": "fa-palette"}
-        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box")}
-        products.append(new_product)
-        save_products(products)
+        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box"), "main_image": "", "sub_images": []}
+        products.append(new_product); save_products(products)
         return {"success": True, "message": f"已新增商品「{name}」：价格 ¥{price}，库存 {stock} 件，分类 {category}，平台 {platform}"}
 
     if t == "delete_product":
         p = find_product(args.get("product_name"))
-        if not p:
-            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
-        name = p["name"]
-        products.remove(p)
-        save_products(products)
+        if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        name = p["name"]; products.remove(p); save_products(products)
         return {"success": True, "message": f"已删除商品「{name}」"}
 
     if t == "batch_update_stock":
-        category = args.get("category")
-        action = args.get("action", "increase")
-        amount = args.get("amount", 0)
+        category = args.get("category"); action = args.get("action", "increase"); amount = args.get("amount", 0)
         matched = [p for p in products if p["category"] == category]
-        if not matched:
-            return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
+        if not matched: return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
         lines = []
         for p in matched:
             old = p["stock"]
@@ -414,28 +453,24 @@ def do_action(t, args):
         action_text = {"increase": "增加", "decrease": "减少", "set": "设置为"}.get(action, "调整")
         return {"success": True, "message": f"已将「{category}」分类商品库存统一{action_text} {amount} 件：\n" + "\n".join(lines)}
 
-    # ===== 查询 =====
     if t == "query_by_platform":
         platform = args.get("platform")
         matched = [p for p in products if p["platform"] == platform]
-        if not matched:
-            return {"success": True, "message": f"「{platform}」平台上没有商品"}
+        if not matched: return {"success": True, "message": f"「{platform}」平台上没有商品"}
         lines = [f"· {p['name']}（{p['status']}）：¥{p['price']}，库存 {p['stock']}" for p in matched]
         return {"success": True, "message": f"「{platform}」平台共有 {len(matched)} 个商品：\n" + "\n".join(lines)}
 
     if t == "query_by_status":
         status = args.get("status")
         matched = [p for p in products if p["status"] == status]
-        if not matched:
-            return {"success": True, "message": f"没有「{status}」状态的商品"}
+        if not matched: return {"success": True, "message": f"没有「{status}」状态的商品"}
         lines = [f"· {p['name']}（{p['category']}）：¥{p['price']}，库存 {p['stock']}" for p in matched]
         return {"success": True, "message": f"「{status}」状态的商品共 {len(matched)} 个：\n" + "\n".join(lines)}
 
     if t == "batch_put_on_shelf":
         category = args.get("category")
         matched = [p for p in products if p["category"] == category]
-        if not matched:
-            return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
+        if not matched: return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
         for p in matched: p["status"] = "在售"
         save_products(products)
         names = "、".join([p["name"] for p in matched])
@@ -443,27 +478,19 @@ def do_action(t, args):
 
     if t == "duplicate_product":
         p = find_product(args.get("product_name"))
-        if not p:
-            return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
+        if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
         new_name = args.get("new_name")
-        if not new_name:
-            return {"success": False, "message": "缺少新商品名称"}
-        if any(prod["name"] == new_name for prod in products):
-            return {"success": False, "message": f"商品「{new_name}」已存在"}
+        if not new_name: return {"success": False, "message": "缺少新商品名称"}
+        if any(prod["name"] == new_name for prod in products): return {"success": False, "message": f"商品「{new_name}」已存在"}
         new_id = max([p["id"] for p in products], default=0) + 1
-        new_product = dict(p)
-        new_product["id"] = new_id
-        new_product["name"] = new_name
-        new_product["sales"] = 0
-        products.append(new_product)
-        save_products(products)
+        new_product = dict(p); new_product["id"] = new_id; new_product["name"] = new_name; new_product["sales"] = 0
+        products.append(new_product); save_products(products)
         return {"success": True, "message": f"已复制「{p['name']}」为「{new_name}」：价格 ¥{new_product['price']}，库存 {new_product['stock']} 件"}
 
     if t == "query_by_category":
         category = args.get("category")
         matched = [p for p in products if p["category"] == category]
-        if not matched:
-            return {"success": True, "message": f"没有「{category}」分类的商品"}
+        if not matched: return {"success": True, "message": f"没有「{category}」分类的商品"}
         lines = [f"· {p['name']}（{p['status']}）：¥{p['price']}，库存 {p['stock']}，销量 {p['sales']}" for p in matched]
         return {"success": True, "message": f"「{category}」分类共 {len(matched)} 个商品：\n" + "\n".join(lines)}
 
@@ -472,31 +499,25 @@ def do_action(t, args):
 
     if t == "search_product":
         keyword = args.get("keyword", "").strip()
-        if not keyword:
-            return {"success": False, "message": "搜索关键词不能为空"}
+        if not keyword: return {"success": False, "message": "搜索关键词不能为空"}
         matched = [p for p in products if keyword in p["name"] or keyword in p["category"] or keyword in p.get("platform", "")]
-        if not matched:
-            return {"success": True, "message": f"没有找到包含「{keyword}」的商品"}
+        if not matched: return {"success": True, "message": f"没有找到包含「{keyword}」的商品"}
         lines = [f"· {p['name']}（{p['category']}）：¥{p['price']}，库存 {p['stock']}" for p in matched]
         return {"success": True, "message": f"搜索「{keyword}」共找到 {len(matched)} 个商品：\n" + "\n".join(lines)}
 
-    # ===== 新增 3 个 =====
     if t == "batch_delete_by_category":
         category = args.get("category")
         matched = [p for p in products if p["category"] == category]
-        if not matched:
-            return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
+        if not matched: return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
         names = "、".join([p["name"] for p in matched])
-        for p in matched:
-            products.remove(p)
+        for p in matched: products.remove(p)
         save_products(products)
         return {"success": True, "message": f"已删除「{category}」分类共 {len(matched)} 个商品：\n{names}"}
 
     if t == "query_restock_alert":
         threshold = args.get("threshold", 50)
         matched = [p for p in products if p["stock"] < threshold]
-        if not matched:
-            return {"success": True, "message": f"没有需要补货的商品（库存都 ≥ {threshold} 件）"}
+        if not matched: return {"success": True, "message": f"没有需要补货的商品（库存都 ≥ {threshold} 件）"}
         lines = [f"· {p['name']}：库存仅 {p['stock']} 件（分类 {p['category']}）" for p in matched]
         return {"success": True, "message": f"⚠️ 需要补货的商品共 {len(matched)} 个（库存 < {threshold} 件）：\n" + "\n".join(lines)}
 
@@ -505,21 +526,36 @@ def do_action(t, args):
 
     return {"success": False, "message": f"未知操作类型：{t}"}
 
+# ============================================================
+# 图片更新接口（供 images.html 直接调用）
+# ============================================================
+class ImageUpdateRequest(BaseModel):
+    main_image: Optional[str] = None
+    sub_images: Optional[List[str]] = None
+
+@app.post("/api/products/{product_id}/images")
+async def update_product_images(product_id: int, req: ImageUpdateRequest):
+    global products
+    p = next((x for x in products if x["id"] == product_id), None)
+    if not p:
+        return {"success": False, "message": f"未找到商品 ID：{product_id}"}
+    if req.main_image is not None:
+        p["main_image"] = req.main_image
+    if req.sub_images is not None:
+        # 最多 5 张
+        p["sub_images"] = req.sub_images[:5]
+    save_products(products)
+    return {"success": True, "message": f"已更新「{p['name']}」的图片"}
+
 @app.get("/api/export/csv")
 async def export_csv():
-    """导出商品数据为 CSV"""
     from fastapi.responses import PlainTextResponse
-    lines = ["ID,商品名称,价格,库存,分类,平台,状态,销量"]
+    lines = ["ID,商品名称,价格,库存,分类,平台,状态,销量,主图,副图数"]
     for p in products:
-        lines.append(f"{p['id']},{p['name']},{p['price']},{p['stock']},{p['category']},{p['platform']},{p['status']},{p['sales']}")
+        lines.append(f"{p['id']},{p['name']},{p['price']},{p['stock']},{p['category']},{p['platform']},{p['status']},{p['sales']},{p.get('main_image','')},{len(p.get('sub_images',[]))}")
     csv_content = "\n".join(lines)
-    # 添加 BOM 以便 Excel 正确识别 UTF-8
     csv_with_bom = "\ufeff" + csv_content
-    return PlainTextResponse(
-        content=csv_with_bom,
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": "attachment; filename=products.csv"}
-    )
+    return PlainTextResponse(content=csv_with_bom, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=products.csv"})
 
 @app.get("/")
 async def root():
