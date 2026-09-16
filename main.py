@@ -26,25 +26,19 @@ client = OpenAI(
     base_url="https://api.deepseek.com"
 )
 
-# ============================================================
-# 文件路径
-# ============================================================
 DATA_FILE = "products.json"
 LOG_FILE = "logs.json"
 LOG_MAX = 1000
 
-# ============================================================
-# 默认商品数据（含图片字段）
-# ============================================================
 DEFAULT_PRODUCTS = [
-    {"id": 1, "name": "云山茶叶礼盒", "price": 128, "stock": 234, "category": "茶叶", "platform": "抖音", "status": "在售", "sales": 1247, "icon": "fa-leaf", "main_image": "", "sub_images": []},
-    {"id": 2, "name": "手工竹编包", "price": 89, "stock": 247, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 856, "icon": "fa-bag-shopping", "main_image": "", "sub_images": []},
-    {"id": 3, "name": "山核桃仁 250g", "price": 45, "stock": 156, "category": "食品", "platform": "拼多多", "status": "在售", "sales": 2345, "icon": "fa-seedling", "main_image": "", "sub_images": []},
-    {"id": 4, "name": "云山手工皂套装", "price": 79, "stock": 89, "category": "文创", "platform": "京东", "status": "在售", "sales": 567, "icon": "fa-soap", "main_image": "", "sub_images": []},
-    {"id": 5, "name": "云山陶瓷杯", "price": 58, "stock": 143, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 1876, "icon": "fa-mug-saucer", "main_image": "", "sub_images": []},
-    {"id": 6, "name": "手写书法折扇", "price": 35, "stock": 0, "category": "文创", "platform": "抖音", "status": "下架", "sales": 234, "icon": "fa-scroll", "main_image": "", "sub_images": []},
-    {"id": 7, "name": "手工红糖姜茶", "price": 29.9, "stock": 210, "category": "食品", "platform": "淘宝", "status": "在售", "sales": 3456, "icon": "fa-candy-cane", "main_image": "", "sub_images": []},
-    {"id": 8, "name": "云山国风丝巾", "price": 68, "stock": 76, "category": "文创", "platform": "拼多多", "status": "在售", "sales": 789, "icon": "fa-palette", "main_image": "", "sub_images": []},
+    {"id": 1, "name": "云山茶叶礼盒", "price": 128, "stock": 234, "category": "茶叶", "platform": "抖音", "status": "在售", "sales": 1247, "icon": "fa-leaf", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
+    {"id": 2, "name": "手工竹编包", "price": 89, "stock": 247, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 856, "icon": "fa-bag-shopping", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
+    {"id": 3, "name": "山核桃仁 250g", "price": 45, "stock": 156, "category": "食品", "platform": "拼多多", "status": "在售", "sales": 2345, "icon": "fa-seedling", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
+    {"id": 4, "name": "云山手工皂套装", "price": 79, "stock": 89, "category": "文创", "platform": "京东", "status": "在售", "sales": 567, "icon": "fa-soap", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
+    {"id": 5, "name": "云山陶瓷杯", "price": 58, "stock": 143, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 1876, "icon": "fa-mug-saucer", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
+    {"id": 6, "name": "手写书法折扇", "price": 35, "stock": 0, "category": "文创", "platform": "抖音", "status": "下架", "sales": 234, "icon": "fa-scroll", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
+    {"id": 7, "name": "手工红糖姜茶", "price": 29.9, "stock": 210, "category": "食品", "platform": "淘宝", "status": "在售", "sales": 3456, "icon": "fa-candy-cane", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
+    {"id": 8, "name": "云山国风丝巾", "price": 68, "stock": 76, "category": "文创", "platform": "拼多多", "status": "在售", "sales": 789, "icon": "fa-palette", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
 ]
 
 def load_products():
@@ -52,10 +46,11 @@ def load_products():
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # 兼容旧数据：补齐图片字段
                 for p in data:
                     if "main_image" not in p: p["main_image"] = ""
                     if "sub_images" not in p: p["sub_images"] = []
+                    if "video" not in p: p["video"] = ""
+                    if "detail_html" not in p: p["detail_html"] = ""
                 return data
         except Exception:
             return DEFAULT_PRODUCTS
@@ -67,9 +62,6 @@ def save_products(products):
 
 products = load_products()
 
-# ============================================================
-# 日志
-# ============================================================
 def load_logs():
     if os.path.exists(LOG_FILE):
         try:
@@ -98,7 +90,9 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "query_restock_alert": "库存预警", "export_to_excel": "导出CSV",
         "set_main_image": "设置主图", "add_sub_image": "添加副图",
         "remove_sub_image": "删除副图", "clear_sub_images": "清空副图",
-        "query_images": "查看图片",
+        "query_images": "查看图片", "delete_main_image": "删除主图",
+        "set_video": "设置视频", "delete_video": "删除视频",
+        "update_detail": "保存图文详情",
     }
     logs = load_logs()
     log_entry = {
@@ -113,9 +107,6 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
     logs.insert(0, log_entry)
     save_logs(logs)
 
-# ============================================================
-# 查找商品
-# ============================================================
 def find_product(name: str):
     if not name:
         return None
@@ -140,7 +131,7 @@ def find_product(name: str):
     return None
 
 # ============================================================
-# AI 工具（33个 = 28 + 5图片）
+# AI 工具（33个）
 # ============================================================
 tools = [
     {"type": "function", "function": {"name": "update_price", "description": "修改指定商品的价格。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "new_price": {"type": "number"}}, "required": ["product_name", "new_price"]}}},
@@ -171,12 +162,11 @@ tools = [
     {"type": "function", "function": {"name": "batch_delete_by_category", "description": "批量删除某个分类的所有商品。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}}},
     {"type": "function", "function": {"name": "query_restock_alert", "description": "查询需要补货的商品。", "parameters": {"type": "object", "properties": {"threshold": {"type": "integer"}}}}},
     {"type": "function", "function": {"name": "export_to_excel", "description": "导出商品数据为CSV。", "parameters": {"type": "object", "properties": {}}}},
-    # ===== 新增 5 个图片工具 =====
-    {"type": "function", "function": {"name": "query_images", "description": "查看某商品的所有图片（主图 + 副图）。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
+    {"type": "function", "function": {"name": "query_images", "description": "查看某商品的所有图片。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
     {"type": "function", "function": {"name": "delete_main_image", "description": "删除某商品的主图。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
-    {"type": "function", "function": {"name": "remove_sub_image", "description": "删除某商品指定序号的副图。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "index": {"type": "integer", "description": "第几张副图，从1开始"}}, "required": ["product_name", "index"]}}},
+    {"type": "function", "function": {"name": "remove_sub_image", "description": "删除某商品指定序号的副图。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "index": {"type": "integer"}}, "required": ["product_name", "index"]}}},
     {"type": "function", "function": {"name": "clear_sub_images", "description": "清空某商品的所有副图。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
-    {"type": "function", "function": {"name": "clear_all_images", "description": "清空某商品的所有图片（主图 + 副图）。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
+    {"type": "function", "function": {"name": "clear_all_images", "description": "清空某商品的所有图片。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
 ]
 
 class ChatRequest(BaseModel):
@@ -194,7 +184,6 @@ async def parse_intent(req: ChatRequest):
                     "如果用户只是闲聊或问问题，不要调用工具，直接回复。"
                     "分类只支持：茶叶、手工艺、食品、文创。"
                     "平台只支持：淘宝、抖音、拼多多、京东。"
-                    "注意：图片上传需要在 images.html 页面操作，AI 指令只能查看、删除图片。"
                 )},
                 {"role": "user", "content": req.text}
             ],
@@ -225,22 +214,16 @@ class ExecuteRequest(BaseModel):
 @app.post("/api/ai/execute")
 async def execute_action(req: ExecuteRequest):
     global products
-    t = req.type
-    args = req.args
-
     try:
-        result = do_action(t, args)
-        add_log(t, args, result.get("message", ""), result.get("success", False))
+        result = do_action(req.type, req.args)
+        add_log(req.type, req.args, result.get("message", ""), result.get("success", False))
         return result
     except Exception as e:
         msg = f"执行失败：{str(e)}"
-        add_log(t, args, msg, False)
+        add_log(req.type, req.args, msg, False)
         return {"success": False, "message": msg}
 
 def do_action(t, args):
-    """执行操作，返回 {success, message}"""
-
-    # ===== 单商品 =====
     if t == "update_price":
         p = find_product(args.get("product_name"))
         if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
@@ -302,7 +285,6 @@ def do_action(t, args):
     if t == "create_coupon":
         return {"success": True, "message": f"已创建优惠券：满 {args.get('threshold')} 减 {args.get('discount')}，有效期 {args.get('days', 7)} 天"}
 
-    # ===== 批量 =====
     if t == "batch_take_off":
         category = args.get("category")
         matched = [p for p in products if p["category"] == category]
@@ -363,7 +345,7 @@ def do_action(t, args):
         if any(p["name"] == name for p in products): return {"success": False, "message": f"商品「{name}」已存在"}
         new_id = max([p["id"] for p in products], default=0) + 1
         icon_map = {"茶叶": "fa-leaf", "手工艺": "fa-bag-shopping", "食品": "fa-seedling", "文创": "fa-palette"}
-        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box"), "main_image": "", "sub_images": []}
+        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box"), "main_image": "", "sub_images": [], "video": "", "detail_html": ""}
         products.append(new_product)
         save_products(products)
         return {"success": True, "message": f"已新增商品「{name}」：价格 ¥{price}，库存 {stock} 件，分类 {category}，平台 {platform}"}
@@ -418,7 +400,7 @@ def do_action(t, args):
         new_id = max([p["id"] for p in products], default=0) + 1
         new_product = dict(p); new_product["id"] = new_id; new_product["name"] = new_name; new_product["sales"] = 0
         products.append(new_product); save_products(products)
-        return {"success": True, "message": f"已复制「{p['name']}」为「{new_name}」：价格 ¥{new_product['price']}，库存 {new_product['stock']} 件"}
+        return {"success": True, "message": f"已复制「{p['name']}」为「{new_name}」"}
 
     if t == "query_by_category":
         category = args.get("category"); matched = [p for p in products if p["category"] == category]
@@ -453,15 +435,15 @@ def do_action(t, args):
         return {"success": True, "message": f"⚠️ 需要补货的商品共 {len(matched)} 个（库存 < {threshold} 件）：\n" + "\n".join(lines)}
 
     if t == "export_to_excel":
-        return {"success": True, "message": f"数据已准备好，请点击下方按钮下载 CSV 文件（共 {len(products)} 个商品）", "csv": True}
+        return {"success": True, "message": f"数据已准备好（共 {len(products)} 个商品）", "csv": True}
 
-    # ===== 图片操作（5个） =====
     if t == "query_images":
         p = find_product(args.get("product_name"))
         if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
         main_status = "有主图" if p.get("main_image") else "无主图"
         sub_count = len(p.get("sub_images", []))
-        return {"success": True, "message": f"「{p['name']}」图片信息：\n· 主图：{main_status}\n· 副图：{sub_count} 张\n（如需上传或修改图片，请打开 images.html 页面操作）"}
+        video_status = "有视频" if p.get("video") else "无视频"
+        return {"success": True, "message": f"「{p['name']}」媒体信息：\n· 主图：{main_status}\n· 副图：{sub_count} 张\n· 视频：{video_status}\n（上传/修改请打开 images.html 页面）"}
 
     if t == "delete_main_image":
         p = find_product(args.get("product_name"))
@@ -475,7 +457,7 @@ def do_action(t, args):
         if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
         index = args.get("index", 1)
         subs = p.get("sub_images", [])
-        if index < 1 or index > len(subs): return {"success": False, "message": f"副图序号 {index} 不存在，当前共 {len(subs)} 张副图"}
+        if index < 1 or index > len(subs): return {"success": False, "message": f"副图序号 {index} 不存在，当前共 {len(subs)} 张"}
         subs.pop(index - 1); p["sub_images"] = subs; save_products(products)
         return {"success": True, "message": f"已删除「{p['name']}」的第 {index} 张副图，剩余 {len(subs)} 张"}
 
@@ -493,7 +475,7 @@ def do_action(t, args):
         main_exist = bool(p.get("main_image")); sub_count = len(p.get("sub_images", []))
         if not main_exist and sub_count == 0: return {"success": False, "message": f"「{p['name']}」没有任何图片"}
         p["main_image"] = ""; p["sub_images"] = []; save_products(products)
-        return {"success": True, "message": f"已清空「{p['name']}」的所有图片（主图：{'有' if main_exist else '无'}，副图：{sub_count} 张）"}
+        return {"success": True, "message": f"已清空「{p['name']}」的所有图片"}
 
     return {"success": False, "message": f"未知操作类型：{t}"}
 
@@ -503,25 +485,29 @@ def do_action(t, args):
 @app.post("/api/images/upload")
 async def upload_image(
     product_name: str = Form(...),
-    image_type: str = Form(...),  # "main" 或 "sub"
+    image_type: str = Form(...),
     file: UploadFile = File(...)
 ):
-    """上传图片，转 Base64 存入商品数据"""
-    p = find_product(product_name)
-    if not p:
-        return {"success": False, "message": f"未找到商品：{product_name}"}
+    # detail 类型不需要商品存在
+    if image_type != "detail":
+        p = find_product(product_name)
+        if not p:
+            return {"success": False, "message": f"未找到商品：{product_name}"}
 
-    # 读取文件
     content = await file.read()
-    # 检查大小（限制 2MB）
-    if len(content) > 2 * 1024 * 1024:
-        return {"success": False, "message": "图片不能超过 2MB"}
+    max_size = 50 * 1024 * 1024 if image_type == "video" else 2 * 1024 * 1024
+    if len(content) > max_size:
+        limit_text = "50MB" if image_type == "video" else "2MB"
+        return {"success": False, "message": f"文件不能超过 {limit_text}"}
 
-    # 检查类型
-    if not file.content_type or not file.content_type.startswith("image/"):
-        return {"success": False, "message": "只支持图片文件"}
+    # 类型检查
+    if image_type == "video":
+        if not file.content_type or not file.content_type.startswith("video/"):
+            return {"success": False, "message": "只支持视频文件"}
+    else:
+        if not file.content_type or not file.content_type.startswith("image/"):
+            return {"success": False, "message": "只支持图片文件"}
 
-    # 转 Base64
     b64 = base64.b64encode(content).decode("utf-8")
     data_url = f"data:{file.content_type};base64,{b64}"
 
@@ -541,14 +527,23 @@ async def upload_image(
         add_log("add_sub_image", {"product_name": product_name}, f"已为「{p['name']}」添加第 {len(subs)} 张副图", True)
         return {"success": True, "message": f"已为「{p['name']}」添加第 {len(subs)} 张副图"}
 
-    return {"success": False, "message": "image_type 必须是 main 或 sub"}
+    elif image_type == "video":
+        p["video"] = data_url
+        save_products(products)
+        add_log("set_video", {"product_name": product_name}, f"已设置「{p['name']}」的视频", True)
+        return {"success": True, "message": f"已设置「{p['name']}」的视频"}
+
+    elif image_type == "detail":
+        # detail 图片只返回 url，不存到商品
+        return {"success": True, "url": data_url, "message": "图片已上传"}
+
+    return {"success": False, "message": "image_type 必须是 main / sub / video / detail"}
 
 @app.post("/api/images/delete")
 async def delete_image(payload: dict):
-    """删除指定图片"""
     product_name = payload.get("product_name")
-    image_type = payload.get("image_type")  # "main" 或 "sub"
-    index = payload.get("index")  # 仅 sub 使用，从0开始
+    image_type = payload.get("image_type")
+    index = payload.get("index")
 
     p = find_product(product_name)
     if not p:
@@ -569,7 +564,31 @@ async def delete_image(payload: dict):
         add_log("remove_sub_image", {"product_name": product_name, "index": index + 1}, f"已删除「{p['name']}」的第 {index + 1} 张副图", True)
         return {"success": True, "message": f"已删除「{p['name']}」的第 {index + 1} 张副图"}
 
-    return {"success": False, "message": "image_type 必须是 main 或 sub"}
+    elif image_type == "video":
+        if not p.get("video"):
+            return {"success": False, "message": "没有视频可删除"}
+        p["video"] = ""; save_products(products)
+        add_log("delete_video", {"product_name": product_name}, f"已删除「{p['name']}」的视频", True)
+        return {"success": True, "message": f"已删除「{p['name']}」的视频"}
+
+    return {"success": False, "message": "image_type 必须是 main / sub / video"}
+
+# ============================================================
+# 保存图文详情
+# ============================================================
+class DetailRequest(BaseModel):
+    product_name: str
+    detail_html: str
+
+@app.post("/api/products/detail")
+async def save_detail(req: DetailRequest):
+    p = find_product(req.product_name)
+    if not p:
+        return {"success": False, "message": f"未找到商品：{req.product_name}"}
+    p["detail_html"] = req.detail_html
+    save_products(products)
+    add_log("update_detail", {"product_name": req.product_name}, f"已保存「{p['name']}」的图文详情", True)
+    return {"success": True, "message": "详情已保存"}
 
 @app.get("/api/export/csv")
 async def export_csv():
