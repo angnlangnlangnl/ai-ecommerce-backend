@@ -28,17 +28,153 @@ client = OpenAI(
 
 DATA_FILE = "products.json"
 LOG_FILE = "logs.json"
+TAG_FILE = "tags.json"
 LOG_MAX = 1000
 
+# ============================================================
+# 平台级类目树（行业标准，只读）
+# ============================================================
+CATEGORY_TREE = [
+    {
+        "id": "cat_food", "name": "食品", "icon": "🍜",
+        "children": [
+            {"id": "cat_food_nuts", "name": "坚果", "children": [
+                {"id": "cat_food_nuts_pistachio", "name": "开心果"},
+                {"id": "cat_food_nuts_walnut", "name": "核桃"},
+                {"id": "cat_food_nuts_almond", "name": "巴旦木"},
+            ]},
+            {"id": "cat_food_tea", "name": "茶饮", "children": [
+                {"id": "cat_food_tea_green", "name": "绿茶"},
+                {"id": "cat_food_tea_black", "name": "红茶"},
+                {"id": "cat_food_tea_oolong", "name": "乌龙茶"},
+            ]},
+            {"id": "cat_food_snack", "name": "零食", "children": [
+                {"id": "cat_food_snack_candy", "name": "糖果"},
+                {"id": "cat_food_snack_dried", "name": "果干"},
+                {"id": "cat_food_snack_meat", "name": "肉干"},
+            ]},
+            {"id": "cat_food_health", "name": "滋补", "children": [
+                {"id": "cat_food_health_tea", "name": "养生茶"},
+                {"id": "cat_food_health_soup", "name": "汤料"},
+            ]},
+        ]
+    },
+    {
+        "id": "cat_handicraft", "name": "手工艺", "icon": "🎨",
+        "children": [
+            {"id": "cat_handicraft_weave", "name": "编织", "children": [
+                {"id": "cat_handicraft_weave_bamboo", "name": "竹编"},
+                {"id": "cat_handicraft_weave_rattan", "name": "藤编"},
+                {"id": "cat_handicraft_weave_cloth", "name": "布艺"},
+            ]},
+            {"id": "cat_handicraft_ceramic", "name": "陶瓷", "children": [
+                {"id": "cat_handicraft_ceramic_cup", "name": "陶瓷杯"},
+                {"id": "cat_handicraft_ceramic_plate", "name": "陶瓷盘"},
+                {"id": "cat_handicraft_ceramic_teapot", "name": "陶瓷壶"},
+            ]},
+            {"id": "cat_handicraft_wood", "name": "木艺", "children": [
+                {"id": "cat_handicraft_wood_box", "name": "木盒"},
+                {"id": "cat_handicraft_wood_toy", "name": "木制玩具"},
+            ]},
+        ]
+    },
+    {
+        "id": "cat_tea", "name": "茶叶", "icon": "🍃",
+        "children": [
+            {"id": "cat_tea_green", "name": "绿茶", "children": [
+                {"id": "cat_tea_green_longjing", "name": "龙井"},
+                {"id": "cat_tea_green_biluochun", "name": "碧螺春"},
+            ]},
+            {"id": "cat_tea_black", "name": "红茶", "children": [
+                {"id": "cat_tea_black_junshan", "name": "君山银针"},
+                {"id": "cat_tea_black_keemun", "name": "祁门红茶"},
+            ]},
+            {"id": "cat_tea_oolong", "name": "乌龙茶", "children": [
+                {"id": "cat_tea_oolong_tieguanyin", "name": "铁观音"},
+                {"id": "cat_tea_oolong_dahongpao", "name": "大红袍"},
+            ]},
+        ]
+    },
+    {
+        "id": "cat_cultural", "name": "文创", "icon": "📚",
+        "children": [
+            {"id": "cat_cultural_paper", "name": "纸艺", "children": [
+                {"id": "cat_cultural_paper_fan", "name": "折扇"},
+                {"id": "cat_cultural_paper_card", "name": "明信片"},
+                {"id": "cat_cultural_paper_bookmark", "name": "书签"},
+            ]},
+            {"id": "cat_cultural_fabric", "name": "布艺", "children": [
+                {"id": "cat_cultural_fabric_scarf", "name": "丝巾"},
+                {"id": "cat_cultural_fabric_bag", "name": "布包"},
+            ]},
+            {"id": "cat_cultural_soap", "name": "香道", "children": [
+                {"id": "cat_cultural_soap_handmade", "name": "手工皂"},
+                {"id": "cat_cultural_soap_scent", "name": "香薰"},
+            ]},
+        ]
+    },
+]
+
+# 类目 ID → 路径映射（后端自动生成）
+CATEGORY_MAP = {}
+def build_category_map(tree, parent_path=None):
+    if parent_path is None:
+        parent_path = []
+    for node in tree:
+        node_id = node["id"]
+        path = parent_path + [{"id": node_id, "name": node["name"]}]
+        CATEGORY_MAP[node_id] = {
+            "name": node["name"],
+            "path": path,
+            "level": len(path),
+            "parent_id": parent_path[-1]["id"] if parent_path else None,
+        }
+        if "children" in node:
+            build_category_map(node["children"], path)
+
+build_category_map(CATEGORY_TREE)
+
+def get_leaf_category_id(node_id):
+    """给定类目 ID，找到其末级类目（叶子）ID"""
+    for p in all_categories_flat:
+        if p == node_id:
+            return node_id
+    return node_id
+
+def is_leaf_category(node_id):
+    """判断类目是否为末级"""
+    node = find_category_node(node_id)
+    if not node:
+        return False
+    return not node.get("children")
+
+def find_category_node(node_id, tree=None):
+    if tree is None:
+        tree = CATEGORY_TREE
+    for node in tree:
+        if node["id"] == node_id:
+            return node
+        if "children" in node:
+            found = find_category_node(node_id, node["children"])
+            if found:
+                return found
+    return None
+
+# 所有类目 ID 扁平列表
+all_categories_flat = list(CATEGORY_MAP.keys())
+
+# ============================================================
+# 默认商品（新增 tags 和 category_path 字段）
+# ============================================================
 DEFAULT_PRODUCTS = [
-    {"id": 1, "name": "云山茶叶礼盒", "price": 128, "stock": 234, "category": "茶叶", "platform": "抖音", "status": "在售", "sales": 1247, "icon": "fa-leaf", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "500g×2", "sku": "YS-2026-001", "rating": "4.9星", "subcat": "茶饮", "third": "礼盒装"},
-    {"id": 2, "name": "手工竹编包", "price": 89, "stock": 247, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 856, "icon": "fa-bag-shopping", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "35×28cm", "sku": "ZB-2026-002", "rating": "4.8星", "subcat": "编织", "third": "手工"},
-    {"id": 3, "name": "山核桃仁 250g", "price": 45, "stock": 156, "category": "食品", "platform": "拼多多", "status": "在售", "sales": 2345, "icon": "fa-seedling", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "250g/袋", "sku": "HT-2026-003", "rating": "4.7星", "subcat": "坚果", "third": "散装"},
-    {"id": 4, "name": "云山手工皂套装", "price": 79, "stock": 89, "category": "文创", "platform": "京东", "status": "在售", "sales": 567, "icon": "fa-soap", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "3块装", "sku": "SZ-2026-004", "rating": "4.5星", "subcat": "纸艺", "third": "定制"},
-    {"id": 5, "name": "云山陶瓷杯", "price": 58, "stock": 143, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 1876, "icon": "fa-mug-saucer", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "350ml", "sku": "TC-2026-005", "rating": "4.9星", "subcat": "陶瓷", "third": "手工"},
-    {"id": 6, "name": "手写书法折扇", "price": 35, "stock": 0, "category": "文创", "platform": "抖音", "status": "下架", "sales": 234, "icon": "fa-scroll", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "10寸", "sku": "FS-2026-006", "rating": "4.6星", "subcat": "纸艺", "third": "定制"},
-    {"id": 7, "name": "手工红糖姜茶", "price": 29.9, "stock": 210, "category": "食品", "platform": "淘宝", "status": "在售", "sales": 3456, "icon": "fa-candy-cane", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "300g/盒", "sku": "JC-2026-007", "rating": "4.9星", "subcat": "茶饮", "third": "礼盒装"},
-    {"id": 8, "name": "云山国风丝巾", "price": 68, "stock": 76, "category": "文创", "platform": "拼多多", "status": "在售", "sales": 789, "icon": "fa-palette", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "90×90cm", "sku": "SJ-2026-008", "rating": "4.8星", "subcat": "编织", "third": "手工"},
+    {"id": 1, "name": "云山茶叶礼盒", "price": 128, "stock": 234, "category": "茶叶", "platform": "抖音", "status": "在售", "sales": 1247, "icon": "fa-leaf", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "500g×2", "sku": "YS-2026-001", "rating": "4.9星", "subcat": "茶饮", "third": "礼盒装", "tags": ["春茶", "送礼首选", "高端款"], "category_path": ["cat_tea", "cat_tea_green", "cat_tea_green_longjing"]},
+    {"id": 2, "name": "手工竹编包", "price": 89, "stock": 247, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 856, "icon": "fa-bag-shopping", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "35×28cm", "sku": "ZB-2026-002", "rating": "4.8星", "subcat": "编织", "third": "手工", "tags": ["手工", "环保"], "category_path": ["cat_handicraft", "cat_handicraft_weave", "cat_handicraft_weave_bamboo"]},
+    {"id": 3, "name": "山核桃仁 250g", "price": 45, "stock": 156, "category": "食品", "platform": "拼多多", "status": "在售", "sales": 2345, "icon": "fa-seedling", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "250g/袋", "sku": "HT-2026-003", "rating": "4.7星", "subcat": "坚果", "third": "散装", "tags": ["零食", "健康"], "category_path": ["cat_food", "cat_food_nuts", "cat_food_nuts_walnut"]},
+    {"id": 4, "name": "云山手工皂套装", "price": 79, "stock": 89, "category": "文创", "platform": "京东", "status": "在售", "sales": 567, "icon": "fa-soap", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "3块装", "sku": "SZ-2026-004", "rating": "4.5星", "subcat": "纸艺", "third": "定制", "tags": ["送礼", "礼盒"], "category_path": ["cat_cultural", "cat_cultural_soap", "cat_cultural_soap_handmade"]},
+    {"id": 5, "name": "云山陶瓷杯", "price": 58, "stock": 143, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 1876, "icon": "fa-mug-saucer", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "350ml", "sku": "TC-2026-005", "rating": "4.9星", "subcat": "陶瓷", "third": "手工", "tags": ["手工", "茶具"], "category_path": ["cat_handicraft", "cat_handicraft_ceramic", "cat_handicraft_ceramic_cup"]},
+    {"id": 6, "name": "手写书法折扇", "price": 35, "stock": 0, "category": "文创", "platform": "抖音", "status": "下架", "sales": 234, "icon": "fa-scroll", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "10寸", "sku": "FS-2026-006", "rating": "4.6星", "subcat": "纸艺", "third": "定制", "tags": ["文创", "国风"], "category_path": ["cat_cultural", "cat_cultural_paper", "cat_cultural_paper_fan"]},
+    {"id": 7, "name": "手工红糖姜茶", "price": 29.9, "stock": 210, "category": "食品", "platform": "淘宝", "status": "在售", "sales": 3456, "icon": "fa-candy-cane", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "300g/盒", "sku": "JC-2026-007", "rating": "4.9星", "subcat": "茶饮", "third": "礼盒装", "tags": ["养生", "暖身"], "category_path": ["cat_food", "cat_food_health", "cat_food_health_tea"]},
+    {"id": 8, "name": "云山国风丝巾", "price": 68, "stock": 76, "category": "文创", "platform": "拼多多", "status": "在售", "sales": 789, "icon": "fa-palette", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "90×90cm", "sku": "SJ-2026-008", "rating": "4.8星", "subcat": "编织", "third": "手工", "tags": ["国风", "送礼"], "category_path": ["cat_cultural", "cat_cultural_fabric", "cat_cultural_fabric_scarf"]},
 ]
 
 def load_products():
@@ -56,6 +192,8 @@ def load_products():
                     if "rating" not in p: p["rating"] = ""
                     if "subcat" not in p: p["subcat"] = ""
                     if "third" not in p: p["third"] = ""
+                    if "tags" not in p: p["tags"] = []
+                    if "category_path" not in p: p["category_path"] = []
                 return data
         except Exception:
             return DEFAULT_PRODUCTS
@@ -67,6 +205,40 @@ def save_products(products):
 
 products = load_products()
 
+# ============================================================
+# 商家级自定义标签
+# ============================================================
+DEFAULT_TAGS = [
+    {"id": "tag_1", "name": "春茶", "color": "#0d7c4f"},
+    {"id": "tag_2", "name": "送礼首选", "color": "#b55a1a"},
+    {"id": "tag_3", "name": "高端款", "color": "#7b4fa0"},
+    {"id": "tag_4", "name": "爆款", "color": "#b51a3f"},
+    {"id": "tag_5", "name": "清仓", "color": "#5f7d95"},
+    {"id": "tag_6", "name": "手工", "color": "#2a7faa"},
+    {"id": "tag_7", "name": "环保", "color": "#0d7c4f"},
+    {"id": "tag_8", "name": "国风", "color": "#b51a5a"},
+    {"id": "tag_9", "name": "养生", "color": "#b55a1a"},
+    {"id": "tag_10", "name": "礼盒", "color": "#7b4fa0"},
+]
+
+def load_tags():
+    if os.path.exists(TAG_FILE):
+        try:
+            with open(TAG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return DEFAULT_TAGS
+    return DEFAULT_TAGS
+
+def save_tags(tags):
+    with open(TAG_FILE, "w", encoding="utf-8") as f:
+        json.dump(tags, f, ensure_ascii=False, indent=2)
+
+tags_store = load_tags()
+
+# ============================================================
+# 日志
+# ============================================================
 def load_logs():
     if os.path.exists(LOG_FILE):
         try:
@@ -98,6 +270,8 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "query_images": "查看图片", "delete_main_image": "删除主图",
         "set_video": "设置视频", "delete_video": "删除视频",
         "update_detail": "保存图文详情",
+        "update_product": "更新商品", "create_product": "创建商品",
+        "create_tag": "新建标签", "delete_tag": "删除标签",
     }
     logs = load_logs()
     log_entry = {
@@ -135,6 +309,9 @@ def find_product(name: str):
                     return p
     return None
 
+# ============================================================
+# AI 工具（保持不变，共 33 个）
+# ============================================================
 tools = [
     {"type": "function", "function": {"name": "update_price", "description": "修改指定商品的价格。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "new_price": {"type": "number"}}, "required": ["product_name", "new_price"]}}},
     {"type": "function", "function": {"name": "update_stock", "description": "修改库存。action: increase/decrease/set。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "action": {"type": "string", "enum": ["increase", "decrease", "set"]}, "amount": {"type": "integer"}}, "required": ["product_name", "action", "amount"]}}},
@@ -184,8 +361,6 @@ async def parse_intent(req: ChatRequest):
                     "你是电商运营助手。用户会用自然语言下达指令，"
                     "你需要判断应该调用哪个工具，并提取参数。"
                     "如果用户只是闲聊或问问题，不要调用工具，直接回复。"
-                    "分类只支持：茶叶、手工艺、食品、文创。"
-                    "平台只支持：淘宝、抖音、拼多多、京东。"
                 )},
                 {"role": "user", "content": req.text}
             ],
@@ -201,10 +376,67 @@ async def parse_intent(req: ChatRequest):
     except Exception as e:
         return {"type": "error", "text": str(e)}
 
+# ============================================================
+# 商品数据接口
+# ============================================================
 @app.get("/api/products")
 async def get_products():
     return {"products": products}
 
+# ============================================================
+# 类目树接口
+# ============================================================
+@app.get("/api/categories/tree")
+async def get_category_tree():
+    return {"categories": CATEGORY_TREE}
+
+@app.get("/api/categories/map")
+async def get_category_map():
+    return {"map": CATEGORY_MAP}
+
+# ============================================================
+# 标签接口
+# ============================================================
+@app.get("/api/tags")
+async def get_tags():
+    return {"tags": tags_store}
+
+class TagCreateRequest(BaseModel):
+    name: str
+    color: Optional[str] = "#4dabf7"
+
+@app.post("/api/tags/create")
+async def create_tag(req: TagCreateRequest):
+    global tags_store
+    name = req.name.strip()
+    if not name:
+        return {"success": False, "message": "标签名称不能为空"}
+    if any(t["name"] == name for t in tags_store):
+        return {"success": False, "message": f"标签「{name}」已存在"}
+    new_id = f"tag_{len(tags_store) + 1}_{int(datetime.now().timestamp())}"
+    new_tag = {"id": new_id, "name": name, "color": req.color}
+    tags_store.append(new_tag)
+    save_tags(tags_store)
+    add_log("create_tag", {"name": name}, f"已新建标签「{name}」", True)
+    return {"success": True, "message": f"已新建标签「{name}」", "tag": new_tag}
+
+class TagDeleteRequest(BaseModel):
+    tag_id: str
+
+@app.post("/api/tags/delete")
+async def delete_tag(req: TagDeleteRequest):
+    global tags_store
+    tag = next((t for t in tags_store if t["id"] == req.tag_id), None)
+    if not tag:
+        return {"success": False, "message": "标签不存在"}
+    tags_store = [t for t in tags_store if t["id"] != req.tag_id]
+    save_tags(tags_store)
+    add_log("delete_tag", {"tag_id": req.tag_id}, f"已删除标签「{tag['name']}」", True)
+    return {"success": True, "message": f"已删除标签「{tag['name']}」"}
+
+# ============================================================
+# 日志接口
+# ============================================================
 @app.get("/api/logs")
 async def get_logs():
     return {"logs": load_logs()}
@@ -348,7 +580,7 @@ def do_action(t, args):
         if any(p["name"] == name for p in products): return {"success": False, "message": f"商品「{name}」已存在"}
         new_id = max([p["id"] for p in products], default=0) + 1
         icon_map = {"茶叶": "fa-leaf", "手工艺": "fa-bag-shopping", "食品": "fa-seedling", "文创": "fa-palette"}
-        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box"), "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": spec, "sku": sku, "rating": "", "subcat": "", "third": ""}
+        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box"), "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": spec, "sku": sku, "rating": "", "subcat": "", "third": "", "tags": [], "category_path": []}
         products.append(new_product)
         save_products(products)
         return {"success": True, "message": f"已新增商品「{name}」：价格 ¥{price}，库存 {stock} 件，分类 {category}，平台 {platform}"}
@@ -446,7 +678,7 @@ def do_action(t, args):
         main_status = "有主图" if p.get("main_image") else "无主图"
         sub_count = len(p.get("sub_images", []))
         video_status = "有视频" if p.get("video") else "无视频"
-        return {"success": True, "message": f"「{p['name']}」媒体信息：\n· 主图：{main_status}\n· 副图：{sub_count} 张\n· 视频：{video_status}\n（上传/修改请打开 images.html 页面）"}
+        return {"success": True, "message": f"「{p['name']}」媒体信息：\n· 主图：{main_status}\n· 副图：{sub_count} 张\n· 视频：{video_status}"}
 
     if t == "delete_main_image":
         p = find_product(args.get("product_name"))
@@ -482,6 +714,9 @@ def do_action(t, args):
 
     return {"success": False, "message": f"未知操作类型：{t}"}
 
+# ============================================================
+# 图片上传 / 删除
+# ============================================================
 @app.post("/api/images/upload")
 async def upload_image(
     product_name: str = Form(...),
@@ -584,7 +819,6 @@ async def save_detail(req: DetailRequest):
     add_log("update_detail", {"product_name": req.product_name}, f"已保存「{p['name']}」的图文详情", True)
     return {"success": True, "message": "详情已保存"}
 
-# 前端直接编辑商品全量字段（用于商品管理页的编辑/新增）
 class ProductUpdateRequest(BaseModel):
     product_name: str
     fields: dict
@@ -634,10 +868,12 @@ async def create_product(req: ProductCreateRequest):
         "rating": f.get("rating", ""),
         "subcat": f.get("subcat", ""),
         "third": f.get("third", ""),
+        "tags": f.get("tags", []),
+        "category_path": f.get("category_path", []),
     }
     products.append(new_product)
     save_products(products)
-    add_log("add_product", {"name": name}, f"已新增商品「{name}」", True)
+    add_log("create_product", {"name": name}, f"已新增「{name}」", True)
     return {"success": True, "message": f"已新增「{name}」", "product": new_product}
 
 class ProductDeleteRequest(BaseModel):
