@@ -31,14 +31,14 @@ LOG_FILE = "logs.json"
 LOG_MAX = 1000
 
 DEFAULT_PRODUCTS = [
-    {"id": 1, "name": "云山茶叶礼盒", "price": 128, "stock": 234, "category": "茶叶", "platform": "抖音", "status": "在售", "sales": 1247, "icon": "fa-leaf", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
-    {"id": 2, "name": "手工竹编包", "price": 89, "stock": 247, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 856, "icon": "fa-bag-shopping", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
-    {"id": 3, "name": "山核桃仁 250g", "price": 45, "stock": 156, "category": "食品", "platform": "拼多多", "status": "在售", "sales": 2345, "icon": "fa-seedling", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
-    {"id": 4, "name": "云山手工皂套装", "price": 79, "stock": 89, "category": "文创", "platform": "京东", "status": "在售", "sales": 567, "icon": "fa-soap", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
-    {"id": 5, "name": "云山陶瓷杯", "price": 58, "stock": 143, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 1876, "icon": "fa-mug-saucer", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
-    {"id": 6, "name": "手写书法折扇", "price": 35, "stock": 0, "category": "文创", "platform": "抖音", "status": "下架", "sales": 234, "icon": "fa-scroll", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
-    {"id": 7, "name": "手工红糖姜茶", "price": 29.9, "stock": 210, "category": "食品", "platform": "淘宝", "status": "在售", "sales": 3456, "icon": "fa-candy-cane", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
-    {"id": 8, "name": "云山国风丝巾", "price": 68, "stock": 76, "category": "文创", "platform": "拼多多", "status": "在售", "sales": 789, "icon": "fa-palette", "main_image": "", "sub_images": [], "video": "", "detail_html": ""},
+    {"id": 1, "name": "云山茶叶礼盒", "price": 128, "stock": 234, "category": "茶叶", "platform": "抖音", "status": "在售", "sales": 1247, "icon": "fa-leaf", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "500g×2", "sku": "YS-2026-001", "rating": "4.9星", "subcat": "茶饮", "third": "礼盒装"},
+    {"id": 2, "name": "手工竹编包", "price": 89, "stock": 247, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 856, "icon": "fa-bag-shopping", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "35×28cm", "sku": "ZB-2026-002", "rating": "4.8星", "subcat": "编织", "third": "手工"},
+    {"id": 3, "name": "山核桃仁 250g", "price": 45, "stock": 156, "category": "食品", "platform": "拼多多", "status": "在售", "sales": 2345, "icon": "fa-seedling", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "250g/袋", "sku": "HT-2026-003", "rating": "4.7星", "subcat": "坚果", "third": "散装"},
+    {"id": 4, "name": "云山手工皂套装", "price": 79, "stock": 89, "category": "文创", "platform": "京东", "status": "在售", "sales": 567, "icon": "fa-soap", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "3块装", "sku": "SZ-2026-004", "rating": "4.5星", "subcat": "纸艺", "third": "定制"},
+    {"id": 5, "name": "云山陶瓷杯", "price": 58, "stock": 143, "category": "手工艺", "platform": "淘宝", "status": "在售", "sales": 1876, "icon": "fa-mug-saucer", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "350ml", "sku": "TC-2026-005", "rating": "4.9星", "subcat": "陶瓷", "third": "手工"},
+    {"id": 6, "name": "手写书法折扇", "price": 35, "stock": 0, "category": "文创", "platform": "抖音", "status": "下架", "sales": 234, "icon": "fa-scroll", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "10寸", "sku": "FS-2026-006", "rating": "4.6星", "subcat": "纸艺", "third": "定制"},
+    {"id": 7, "name": "手工红糖姜茶", "price": 29.9, "stock": 210, "category": "食品", "platform": "淘宝", "status": "在售", "sales": 3456, "icon": "fa-candy-cane", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "300g/盒", "sku": "JC-2026-007", "rating": "4.9星", "subcat": "茶饮", "third": "礼盒装"},
+    {"id": 8, "name": "云山国风丝巾", "price": 68, "stock": 76, "category": "文创", "platform": "拼多多", "status": "在售", "sales": 789, "icon": "fa-palette", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "90×90cm", "sku": "SJ-2026-008", "rating": "4.8星", "subcat": "编织", "third": "手工"},
 ]
 
 def load_products():
@@ -51,6 +51,11 @@ def load_products():
                     if "sub_images" not in p: p["sub_images"] = []
                     if "video" not in p: p["video"] = ""
                     if "detail_html" not in p: p["detail_html"] = ""
+                    if "spec" not in p: p["spec"] = ""
+                    if "sku" not in p: p["sku"] = ""
+                    if "rating" not in p: p["rating"] = ""
+                    if "subcat" not in p: p["subcat"] = ""
+                    if "third" not in p: p["third"] = ""
                 return data
         except Exception:
             return DEFAULT_PRODUCTS
@@ -130,9 +135,6 @@ def find_product(name: str):
                     return p
     return None
 
-# ============================================================
-# AI 工具（33个）
-# ============================================================
 tools = [
     {"type": "function", "function": {"name": "update_price", "description": "修改指定商品的价格。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "new_price": {"type": "number"}}, "required": ["product_name", "new_price"]}}},
     {"type": "function", "function": {"name": "update_stock", "description": "修改库存。action: increase/decrease/set。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "action": {"type": "string", "enum": ["increase", "decrease", "set"]}, "amount": {"type": "integer"}}, "required": ["product_name", "action", "amount"]}}},
@@ -149,7 +151,7 @@ tools = [
     {"type": "function", "function": {"name": "batch_take_off_zero_stock", "description": "下架所有零库存商品。", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "batch_markup_all", "description": "全店加价百分比。", "parameters": {"type": "object", "properties": {"percent": {"type": "number"}}, "required": ["percent"]}}},
     {"type": "function", "function": {"name": "query_sort_by_sales", "description": "按销量排序。", "parameters": {"type": "object", "properties": {"order": {"type": "string", "enum": ["desc", "asc"]}, "limit": {"type": "integer"}}}}},
-    {"type": "function", "function": {"name": "add_product", "description": "新增商品。", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "price": {"type": "number"}, "stock": {"type": "integer"}, "category": {"type": "string"}, "platform": {"type": "string"}}, "required": ["name", "price"]}}},
+    {"type": "function", "function": {"name": "add_product", "description": "新增商品。", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "price": {"type": "number"}, "stock": {"type": "integer"}, "category": {"type": "string"}, "platform": {"type": "string"}, "spec": {"type": "string"}, "sku": {"type": "string"}}, "required": ["name", "price"]}}},
     {"type": "function", "function": {"name": "delete_product", "description": "删除单个商品。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
     {"type": "function", "function": {"name": "batch_update_stock", "description": "批量改库存。action: increase/decrease/set。", "parameters": {"type": "object", "properties": {"category": {"type": "string"}, "action": {"type": "string", "enum": ["increase", "decrease", "set"]}, "amount": {"type": "integer"}}, "required": ["category", "action", "amount"]}}},
     {"type": "function", "function": {"name": "query_by_platform", "description": "按平台查询。", "parameters": {"type": "object", "properties": {"platform": {"type": "string"}}, "required": ["platform"]}}},
@@ -341,11 +343,12 @@ def do_action(t, args):
     if t == "add_product":
         name = args.get("name"); price = args.get("price")
         stock = args.get("stock", 0); category = args.get("category", "文创"); platform = args.get("platform", "淘宝")
+        spec = args.get("spec", ""); sku = args.get("sku", "")
         if not name or price is None: return {"success": False, "message": "缺少商品名称或价格"}
         if any(p["name"] == name for p in products): return {"success": False, "message": f"商品「{name}」已存在"}
         new_id = max([p["id"] for p in products], default=0) + 1
         icon_map = {"茶叶": "fa-leaf", "手工艺": "fa-bag-shopping", "食品": "fa-seedling", "文创": "fa-palette"}
-        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box"), "main_image": "", "sub_images": [], "video": "", "detail_html": ""}
+        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box"), "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": spec, "sku": sku, "rating": "", "subcat": "", "third": ""}
         products.append(new_product)
         save_products(products)
         return {"success": True, "message": f"已新增商品「{name}」：价格 ¥{price}，库存 {stock} 件，分类 {category}，平台 {platform}"}
@@ -479,16 +482,12 @@ def do_action(t, args):
 
     return {"success": False, "message": f"未知操作类型：{t}"}
 
-# ============================================================
-# 图片上传 / 删除接口
-# ============================================================
 @app.post("/api/images/upload")
 async def upload_image(
     product_name: str = Form(...),
     image_type: str = Form(...),
     file: UploadFile = File(...)
 ):
-    # detail 类型不需要商品存在
     if image_type != "detail":
         p = find_product(product_name)
         if not p:
@@ -500,7 +499,6 @@ async def upload_image(
         limit_text = "50MB" if image_type == "video" else "2MB"
         return {"success": False, "message": f"文件不能超过 {limit_text}"}
 
-    # 类型检查
     if image_type == "video":
         if not file.content_type or not file.content_type.startswith("video/"):
             return {"success": False, "message": "只支持视频文件"}
@@ -534,7 +532,6 @@ async def upload_image(
         return {"success": True, "message": f"已设置「{p['name']}」的视频"}
 
     elif image_type == "detail":
-        # detail 图片只返回 url，不存到商品
         return {"success": True, "url": data_url, "message": "图片已上传"}
 
     return {"success": False, "message": "image_type 必须是 main / sub / video / detail"}
@@ -573,9 +570,6 @@ async def delete_image(payload: dict):
 
     return {"success": False, "message": "image_type 必须是 main / sub / video"}
 
-# ============================================================
-# 保存图文详情
-# ============================================================
 class DetailRequest(BaseModel):
     product_name: str
     detail_html: str
@@ -590,11 +584,82 @@ async def save_detail(req: DetailRequest):
     add_log("update_detail", {"product_name": req.product_name}, f"已保存「{p['name']}」的图文详情", True)
     return {"success": True, "message": "详情已保存"}
 
+# 前端直接编辑商品全量字段（用于商品管理页的编辑/新增）
+class ProductUpdateRequest(BaseModel):
+    product_name: str
+    fields: dict
+
+@app.post("/api/products/update")
+async def update_product(req: ProductUpdateRequest):
+    p = find_product(req.product_name)
+    if not p:
+        return {"success": False, "message": f"未找到商品：{req.product_name}"}
+    for key, val in req.fields.items():
+        if key in ("id",):
+            continue
+        p[key] = val
+    save_products(products)
+    add_log("update_product", {"product_name": req.product_name}, f"已更新「{p['name']}」信息", True)
+    return {"success": True, "message": f"已更新「{p['name']}」"}
+
+class ProductCreateRequest(BaseModel):
+    fields: dict
+
+@app.post("/api/products/create")
+async def create_product(req: ProductCreateRequest):
+    global products
+    f = req.fields
+    name = f.get("name", "").strip()
+    if not name:
+        return {"success": False, "message": "缺少商品名称"}
+    if any(p["name"] == name for p in products):
+        return {"success": False, "message": f"商品「{name}」已存在"}
+    new_id = max([p["id"] for p in products], default=0) + 1
+    icon_map = {"茶叶": "fa-leaf", "手工艺": "fa-bag-shopping", "食品": "fa-seedling", "文创": "fa-palette"}
+    new_product = {
+        "id": new_id, "name": name,
+        "price": f.get("price", 0),
+        "stock": f.get("stock", 0),
+        "category": f.get("category", "文创"),
+        "platform": f.get("platform", "淘宝"),
+        "status": f.get("status", "在售"),
+        "sales": 0,
+        "icon": icon_map.get(f.get("category", "文创"), "fa-box"),
+        "main_image": f.get("main_image", ""),
+        "sub_images": f.get("sub_images", []),
+        "video": f.get("video", ""),
+        "detail_html": f.get("detail_html", ""),
+        "spec": f.get("spec", ""),
+        "sku": f.get("sku", ""),
+        "rating": f.get("rating", ""),
+        "subcat": f.get("subcat", ""),
+        "third": f.get("third", ""),
+    }
+    products.append(new_product)
+    save_products(products)
+    add_log("add_product", {"name": name}, f"已新增商品「{name}」", True)
+    return {"success": True, "message": f"已新增「{name}」", "product": new_product}
+
+class ProductDeleteRequest(BaseModel):
+    product_name: str
+
+@app.post("/api/products/delete")
+async def delete_product_api(req: ProductDeleteRequest):
+    global products
+    p = find_product(req.product_name)
+    if not p:
+        return {"success": False, "message": f"未找到商品：{req.product_name}"}
+    name = p["name"]
+    products.remove(p)
+    save_products(products)
+    add_log("delete_product", {"product_name": name}, f"已删除「{name}」", True)
+    return {"success": True, "message": f"已删除「{name}」"}
+
 @app.get("/api/export/csv")
 async def export_csv():
-    lines = ["ID,商品名称,价格,库存,分类,平台,状态,销量"]
+    lines = ["ID,商品名称,规格,SKU,价格,库存,分类,平台,状态,销量,评价"]
     for p in products:
-        lines.append(f"{p['id']},{p['name']},{p['price']},{p['stock']},{p['category']},{p['platform']},{p['status']},{p['sales']}")
+        lines.append(f"{p['id']},{p.get('name','')},{p.get('spec','')},{p.get('sku','')},{p['price']},{p['stock']},{p['category']},{p['platform']},{p['status']},{p['sales']},{p.get('rating','')}")
     csv_content = "\ufeff" + "\n".join(lines)
     return PlainTextResponse(
         content=csv_content,
