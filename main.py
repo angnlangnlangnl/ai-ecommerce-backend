@@ -135,14 +135,12 @@ def build_category_map(tree, parent_path=None):
 build_category_map(CATEGORY_TREE)
 
 def get_leaf_category_id(node_id):
-    """给定类目 ID，找到其末级类目（叶子）ID"""
     for p in all_categories_flat:
         if p == node_id:
             return node_id
     return node_id
 
 def is_leaf_category(node_id):
-    """判断类目是否为末级"""
     node = find_category_node(node_id)
     if not node:
         return False
@@ -160,11 +158,10 @@ def find_category_node(node_id, tree=None):
                 return found
     return None
 
-# 所有类目 ID 扁平列表
 all_categories_flat = list(CATEGORY_MAP.keys())
 
 # ============================================================
-# 默认商品（新增 tags 和 category_path 字段）
+# 默认商品
 # ============================================================
 DEFAULT_PRODUCTS = [
     {"id": 1, "name": "云山茶叶礼盒", "price": 128, "stock": 234, "category": "茶叶", "platform": "抖音", "status": "在售", "sales": 1247, "icon": "fa-leaf", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "500g×2", "sku": "YS-2026-001", "rating": "4.9星", "subcat": "茶饮", "third": "礼盒装", "tags": ["春茶", "送礼首选", "高端款"], "category_path": ["cat_tea", "cat_tea_green", "cat_tea_green_longjing"]},
@@ -272,6 +269,7 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "update_detail": "保存图文详情",
         "update_product": "更新商品", "create_product": "创建商品",
         "create_tag": "新建标签", "delete_tag": "删除标签",
+        "sync_materials": "同步素材到商品",
     }
     logs = load_logs()
     log_entry = {
@@ -310,7 +308,7 @@ def find_product(name: str):
     return None
 
 # ============================================================
-# AI 工具（保持不变，共 33 个）
+# AI 工具（33 个，保持不变）
 # ============================================================
 tools = [
     {"type": "function", "function": {"name": "update_price", "description": "修改指定商品的价格。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "new_price": {"type": "number"}}, "required": ["product_name", "new_price"]}}},
@@ -890,6 +888,77 @@ async def delete_product_api(req: ProductDeleteRequest):
     save_products(products)
     add_log("delete_product", {"product_name": name}, f"已删除「{name}」", True)
     return {"success": True, "message": f"已删除「{name}」"}
+
+# ============================================================
+# 新增：批量同步素材到商品（支持单选 / 多选）
+# ============================================================
+class SyncMaterialRequest(BaseModel):
+    product_names: List[str]
+    main_image: Optional[str] = None
+    sub_images: Optional[List[str]] = None
+    video: Optional[str] = None
+    detail_html: Optional[str] = None
+    mode: str = "merge"  # merge=合并/追加；replace=覆盖
+
+@app.post("/api/materials/sync")
+async def sync_materials(req: SyncMaterialRequest):
+    """
+    把一组素材同步到一个或多个商品。
+    - product_names 长度为 1 → 单选
+    - product_names 长度为 N → 多选
+    - mode=merge: 副图追加（最多 5 张）；mode=replace: 副图覆盖
+    - 主图 / 视频 / 详情页：始终覆盖（单值字段）
+    """
+    global products
+    if not req.product_names:
+        return {"success": False, "message": "请至少选择一个商品"}
+
+    results = []
+    for name in req.product_names:
+        p = find_product(name)
+        if not p:
+            results.append({"name": name, "ok": False, "msg": "未找到商品"})
+            continue
+
+        try:
+            # 主图
+            if req.main_image:
+                p["main_image"] = req.main_image
+
+            # 副图：merge 追加 / replace 覆盖，最多 5 张
+            if req.sub_images:
+                if req.mode == "replace":
+                    p["sub_images"] = req.sub_images[:5]
+                else:
+                    existing = p.get("sub_images", [])
+                    p["sub_images"] = (existing + req.sub_images)[:5]
+
+            # 视频
+            if req.video:
+                p["video"] = req.video
+
+            # 详情页
+            if req.detail_html:
+                p["detail_html"] = req.detail_html
+
+            results.append({"name": p["name"], "ok": True, "msg": "已同步"})
+        except Exception as e:
+            results.append({"name": name, "ok": False, "msg": str(e)})
+
+    save_products(products)
+    ok_count = len([r for r in results if r["ok"]])
+    fail_count = len(results) - ok_count
+    add_log(
+        "sync_materials",
+        {"products": req.product_names, "mode": req.mode},
+        f"已同步素材到 {ok_count} 个商品（失败 {fail_count}）",
+        fail_count == 0
+    )
+    return {
+        "success": True,
+        "message": f"同步完成：成功 {ok_count} 个，失败 {fail_count} 个",
+        "results": results
+    }
 
 @app.get("/api/export/csv")
 async def export_csv():
