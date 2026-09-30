@@ -31,12 +31,11 @@ TEMP_ALLOWED_VIDEO = {"video/mp4", "video/webm", "video/quicktime"}
 TEMP_META_FILE = TEMP_UPLOAD_DIR / "_meta.json"
 
 # ============================================================
-# ★ 改动 1：商品素材持久化目录
+# 商品素材持久化目录
 # ============================================================
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads")).resolve()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# 子目录：主图 / 副图 / 视频 / 详情图
 for _sub in ("main", "sub", "video", "detail"):
     (UPLOAD_DIR / _sub).mkdir(parents=True, exist_ok=True)
 
@@ -104,7 +103,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ★ 改动 2：挂载商品素材静态目录
+# 挂载商品素材静态目录
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 # DeepSeek（文本）
@@ -367,6 +366,8 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "extract_frames": "视频抽帧",
         "decompose_video": "视频反解",
         "parse_generation": "AI 意图识别",
+        "match_products": "商品智能匹配",
+        "market_analysis": "市场趋势分析",
     }
     logs = load_logs()
     log_entry = {
@@ -407,23 +408,17 @@ def find_product(name: str):
 
 
 # ============================================================
-# ★ 改动 3：新增工具函数 —— 根据 URL 反查并删除文件
+# 根据 URL 反查并删除文件
 # ============================================================
 def _delete_file_by_url(url: str):
-    """
-    从公开 URL 反查文件路径并删除。
-    只处理包含 /uploads/ 的 URL，其他（外链、base64、空值）忽略。
-    """
     if not url or not isinstance(url, str):
         return
     if "/uploads/" not in url:
         return
     try:
         relative = url.split("/uploads/", 1)[1]
-        # 去掉 query / fragment
         relative = relative.split("?", 1)[0].split("#", 1)[0]
         file_path = (UPLOAD_DIR / relative).resolve()
-        # 安全检查：防止路径穿越
         if not str(file_path).startswith(str(UPLOAD_DIR)):
             return
         file_path.unlink(missing_ok=True)
@@ -502,18 +497,10 @@ async def parse_intent(req: ChatRequest):
 
 
 # ============================================================
-# ★ 新增：AI 生成意图识别
+# AI 生成意图识别
 # ============================================================
 @app.post("/api/ai/parse-generation")
 async def parse_generation(req: dict):
-    """
-    分析用户输入，判断生成意图：
-    - kind: images / video / poster / null
-    - is_bound: 是否绑定商品
-    - product_name: 绑定商品名（仅 is_bound=true 时有效）
-    - free_theme: 自由主题（is_bound=false 时有效）
-    - poster_type: 海报类型
-    """
     text = req.get('text', '')
     available_products = req.get('available_products', [])
     has_reference = req.get('has_reference', False)
@@ -583,6 +570,245 @@ async def parse_generation(req: dict):
             "is_bound": False,
             "product_name": "",
             "error": str(e)
+        }
+
+
+# ============================================================
+# ★ 新增 1：商品智能匹配（三级匹配）
+# ============================================================
+class MatchRequest(BaseModel):
+    keywords: List[str]
+    generation_context: Optional[str] = ""
+
+
+@app.post("/api/products/match")
+async def match_products(req: MatchRequest):
+    """
+    三级匹配：
+    L1 精确匹配 → score 1.0
+    L2 语义匹配（AI）→ score 0.5~0.99
+    L3 分类/标签匹配 → score 0.5~0.7
+    """
+    if not products or not req.keywords:
+        return {"success": True, "matches": []}
+
+    matches = []
+    seen = set()
+
+    # ---------- L1: 精确匹配 ----------
+    for kw in req.keywords:
+        clean = kw.replace(" ", "").strip().lower()
+        for p in products:
+            pn = p["name"].replace(" ", "").lower()
+            if pn == clean:
+                key = (p["name"], "exact")
+                if key not in seen:
+                    seen.add(key)
+                    matches.append({
+                        "product_name": p["name"],
+                        "match_level": "exact",
+                        "score": 1.0,
+                        "reason": f"精确匹配「{kw}」"
+                    })
+
+    if matches:
+        add_log("match_products", {"keywords": req.keywords}, f"L1 精确匹配 {len(matches)} 个", True)
+        return {"success": True, "matches": matches}
+
+    # ---------- L2: 语义匹配（AI） ----------
+    products_summary = [
+        {
+            "name": p["name"],
+            "category": p.get("category", ""),
+            "subcat": p.get("subcat", ""),
+            "tags": p.get("tags", []),
+            "spec": p.get("spec", ""),
+            "price": p.get("price", 0)
+        }
+        for p in products
+    ]
+
+    try:
+        prompt = f"""你是电商商品匹配助手。
+
+用户输入：{', '.join(req.keywords)}
+生成内容类型：{req.generation_context or '图片'}
+
+可选商品列表：
+{json.dumps(products_summary, ensure_ascii=False, indent=2)}
+
+请判断用户输入最可能对应哪个（或哪些）商品。考虑：
+1. 商品名称的语义相关性
+2. 商品的分类（如"茶叶"类商品与用户说的"茶叶"相关）
+3. 商品的子分类（如"龙井"与子类"龙井"相关）
+4. 商品的标签（如标签"送礼"与用户说的"送礼"相关）
+5. 商品的规格、用途
+
+严格返回 JSON（不要 markdown 代码块，不要任何解释）：
+{{
+  "matches": [
+    {{
+      "product_name": "商品名（必须是列表中的一个）",
+      "score": 0.85,
+      "reason": "简短说明为什么匹配（15字以内）"
+    }}
+  ]
+}}
+
+规则：
+- 只返回 score >= 0.5 的匹配
+- score 1.0 = 完全等价，0.8 = 高度相关，0.6 = 中等相关，0.5 = 弱相关
+- 如果都不相关，返回 {{"matches": []}}
+- 最多返回 3 个匹配，按 score 降序
+"""
+        response = client.chat.completions.create(
+            model="deepseek-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            if len(parts) >= 2:
+                raw = parts[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+
+        ai_result = json.loads(raw)
+        ai_matches = ai_result.get("matches", [])
+
+        valid_names = {p["name"] for p in products}
+        for m in ai_matches:
+            if m.get("product_name") in valid_names:
+                key = (m["product_name"], "semantic")
+                if key not in seen:
+                    seen.add(key)
+                    matches.append({
+                        "product_name": m["product_name"],
+                        "match_level": "semantic",
+                        "score": float(m.get("score", 0.6)),
+                        "reason": m.get("reason", "语义相关")
+                    })
+    except Exception as e:
+        print(f"[match_products] AI 语义匹配失败: {e}")
+
+    # ---------- L3: 分类/标签匹配（兜底） ----------
+    if not matches:
+        for kw in req.keywords:
+            clean = kw.replace(" ", "").lower()
+            for p in products:
+                p_category = p.get("category", "").lower()
+                p_subcat = p.get("subcat", "").lower()
+                p_tags = [t.lower() for t in p.get("tags", [])]
+
+                hit = False
+                if clean in p_category or clean in p_subcat:
+                    hit = True
+                if any(clean in t for t in p_tags):
+                    hit = True
+                if clean in p["name"].lower():
+                    hit = True
+
+                if hit:
+                    key = (p["name"], "category")
+                    if key not in seen:
+                        seen.add(key)
+                        matches.append({
+                            "product_name": p["name"],
+                            "match_level": "category",
+                            "score": 0.6,
+                            "reason": f"命中分类/标签"
+                        })
+
+    matches.sort(key=lambda x: x["score"], reverse=True)
+    matches = matches[:5]
+
+    add_log("match_products", {"keywords": req.keywords}, f"共匹配 {len(matches)} 个商品", True)
+    return {"success": True, "matches": matches}
+
+
+# ============================================================
+# ★ 新增 2：AI 分析市场环境（自由生成时用）
+# ============================================================
+class MarketAnalysisRequest(BaseModel):
+    theme: str
+    kind: str
+    platform: Optional[str] = "全平台"
+
+
+@app.post("/api/ai/market-analysis")
+async def market_analysis(req: MarketAnalysisRequest):
+    """
+    分析当下市场环境，为自由生成提供 prompt 增强建议。
+    """
+    if not req.theme:
+        return {"success": False, "message": "缺少主题"}
+
+    now = datetime.now()
+    month = now.month
+    if month in (3, 4, 5):
+        season_hint = "春季"
+    elif month in (6, 7, 8):
+        season_hint = "夏季"
+    elif month in (9, 10, 11):
+        season_hint = "秋季"
+    else:
+        season_hint = "冬季"
+
+    kind_names = {"images": "商品主图", "video": "短视频", "poster": "宣传海报"}
+    kind_name = kind_names.get(req.kind, "商品素材")
+
+    prompt = f"""你是资深电商视觉营销专家。用户想为「{req.theme}」生成{kind_name}。
+当前时间：{now.strftime('%Y年%m月%d日')}（{season_hint}）
+目标平台：{req.platform}
+
+请分析当下市场环境，给出：
+1. 这个主题在**当前季节/时间**最受欢迎的**视觉风格**（如国潮、极简、暖色调、新中式等）
+2. 该主题在**当下电商平台**的**主流消费场景**（如送礼、自用、囤货、换季）
+3. 应该突出的**核心卖点**（3个以内）
+4. 应该避免的**过时元素**（1-2个）
+
+严格返回 JSON（不要 markdown 代码块）：
+{{
+  "trend_style": "当下最流行的视觉风格关键词（20字内）",
+  "scenario": "主流消费场景（15字内）",
+  "selling_points": ["卖点1", "卖点2", "卖点3"],
+  "avoid": ["避免1", "避免2"],
+  "prompt_enhancement": "一段 60-100 字的 prompt 增强描述",
+  "season_tag": "{season_hint}"
+}}
+"""
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            if len(parts) >= 2:
+                raw = parts[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+
+        result = json.loads(raw)
+        add_log("market_analysis", {"theme": req.theme, "kind": req.kind}, "分析成功", True)
+        return {"success": True, "analysis": result}
+    except Exception as e:
+        print(f"[market_analysis] 失败: {e}")
+        return {
+            "success": True,
+            "analysis": {
+                "trend_style": "现代简约，暖色调",
+                "scenario": "自用/送礼",
+                "selling_points": ["品质", "设计", "性价比"],
+                "avoid": ["过时的浓重滤镜"],
+                "prompt_enhancement": "modern minimalist style, warm tone, high-end commercial photography",
+                "season_tag": season_hint
+            }
         }
 
 
@@ -870,7 +1096,6 @@ def do_action(t, args):
         category = args.get("category"); matched = [p for p in products if p["category"] == category]
         if not matched: return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
         names = "、".join([p["name"] for p in matched])
-        # ★ 改动 4：删除商品时同时清理它的素材文件
         for p in matched:
             _delete_file_by_url(p.get("main_image", ""))
             _delete_file_by_url(p.get("video", ""))
@@ -949,7 +1174,6 @@ def do_action(t, args):
 # ============================================================
 # 图片上传 / 删除
 # ============================================================
-# ★ 改动 5：整个 upload_image 接口重写 —— 落盘 + 返回 URL
 @app.post("/api/images/upload")
 async def upload_image(
     request: Request,
@@ -957,21 +1181,18 @@ async def upload_image(
     image_type: str = Form(...),
     file: UploadFile = File(...)
 ):
-    # ---------- 1. 校验商品（detail 类型除外） ----------
     p = None
     if image_type != "detail":
         p = find_product(product_name)
         if not p:
             return {"success": False, "message": f"未找到商品：{product_name}"}
 
-    # ---------- 2. 读取 + 大小校验 ----------
     content = await file.read()
     max_size = 50 * 1024 * 1024 if image_type == "video" else 2 * 1024 * 1024
     if len(content) > max_size:
         limit_text = "50MB" if image_type == "video" else "2MB"
         return {"success": False, "message": f"文件不能超过 {limit_text}"}
 
-    # ---------- 3. MIME 校验 ----------
     if image_type == "video":
         if not file.content_type or not file.content_type.startswith("video/"):
             return {"success": False, "message": "只支持视频文件"}
@@ -979,7 +1200,6 @@ async def upload_image(
         if not file.content_type or not file.content_type.startswith("image/"):
             return {"success": False, "message": "只支持图片文件"}
 
-    # ---------- 4. 落盘 ----------
     if image_type == "sub":
         safe_name = "".join(c for c in product_name if c.isalnum() or c in "-_") or "unknown"
         sub_dir = UPLOAD_DIR / "sub" / safe_name
@@ -997,7 +1217,6 @@ async def upload_image(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # ---------- 5. 生成公开 URL ----------
     base_url = str(request.base_url).rstrip("/")
     if image_type == "sub":
         safe_name = "".join(c for c in product_name if c.isalnum() or c in "-_") or "unknown"
@@ -1005,7 +1224,6 @@ async def upload_image(
     else:
         public_url = f"{base_url}/uploads/{image_type}/{stored_name}"
 
-    # ---------- 6. 更新商品字段 ----------
     if image_type == "main":
         old_url = p.get("main_image", "")
         p["main_image"] = public_url
@@ -1042,7 +1260,6 @@ async def upload_image(
     return {"success": False, "message": "image_type 必须是 main / sub / video / detail"}
 
 
-# ★ 改动 6：删除接口 —— 同时清理磁盘文件
 @app.post("/api/images/delete")
 async def delete_image(payload: dict):
     product_name = payload.get("product_name")
@@ -1175,7 +1392,6 @@ async def delete_product_api(req: ProductDeleteRequest):
     if not p:
         return {"success": False, "message": f"未找到商品：{req.product_name}"}
     name = p["name"]
-    # ★ 改动 7：删除商品时同时清理素材
     _delete_file_by_url(p.get("main_image", ""))
     _delete_file_by_url(p.get("video", ""))
     for sub in p.get("sub_images", []):
@@ -1220,7 +1436,6 @@ async def sync_materials(req: SyncMaterialRequest):
 
             if req.sub_images:
                 if req.mode == "replace":
-                    # 替换模式：先删旧的
                     for old in p.get("sub_images", []):
                         _delete_file_by_url(old)
                     p["sub_images"] = req.sub_images[:5]
@@ -1586,7 +1801,7 @@ async def export_csv():
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "AI 助手后端服务运行中（含 AI 意图识别 + 临时图床 + 视频反解 + 素材持久化）"}
+    return {"status": "ok", "message": "AI 助手后端服务运行中（含 AI 意图识别 + 智能商品匹配 + 市场分析 + 临时图床 + 视频反解 + 素材持久化）"}
 
 
 if __name__ == "__main__":
