@@ -1,18 +1,84 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from openai import OpenAI
 import os
 import json
 import base64
+import uuid
+import time
+import asyncio
+from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 from typing import Optional, List
+from contextlib import asynccontextmanager
 
 load_dotenv()
 
-app = FastAPI()
+# ============================================================
+# 临时图床配置
+# ============================================================
+TEMP_UPLOAD_DIR = Path(os.getenv("TEMP_UPLOAD_DIR", "temp_uploads")).resolve()
+TEMP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_FILE_TTL = int(os.getenv("TEMP_FILE_TTL", 3600))
+TEMP_MAX_FILE_SIZE = 20 * 1024 * 1024
+TEMP_ALLOWED_IMAGE = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+TEMP_ALLOWED_VIDEO = {"video/mp4", "video/webm", "video/quicktime"}
+
+TEMP_META_FILE = TEMP_UPLOAD_DIR / "_meta.json"
+
+def _load_temp_meta():
+    if TEMP_META_FILE.exists():
+        try:
+            with open(TEMP_META_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def _save_temp_meta(meta):
+    try:
+        with open(TEMP_META_FILE, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+temp_meta = _load_temp_meta()
+
+def _cleanup_expired():
+    now = time.time()
+    expired = []
+    for file_id, info in temp_meta.items():
+        if now - info.get("created_at", 0) > TEMP_FILE_TTL:
+            expired.append(file_id)
+    for file_id in expired:
+        info = temp_meta.pop(file_id, None)
+        if info:
+            try:
+                Path(info["path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+    if expired:
+        _save_temp_meta(temp_meta)
+
+async def _periodic_cleanup():
+    while True:
+        try:
+            _cleanup_expired()
+        except Exception as e:
+            print("[cleanup] error:", e)
+        await asyncio.sleep(600)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_periodic_cleanup())
+    yield
+    task.cancel()
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,9 +87,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# DeepSeek（文本）
 client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
     base_url="https://api.deepseek.com"
+)
+
+# Agnes（多模态 + 视频/图片生成）
+agnes_client = OpenAI(
+    api_key=os.getenv("AGNES_API_KEY", "sk-XmLjN9e3Mhh8wf"),
+    base_url="https://apihub.agnes-ai.com/v1"
 )
 
 DATA_FILE = "products.json"
@@ -32,7 +105,7 @@ TAG_FILE = "tags.json"
 LOG_MAX = 1000
 
 # ============================================================
-# 平台级类目树（行业标准，只读）
+# 平台级类目树
 # ============================================================
 CATEGORY_TREE = [
     {
@@ -115,7 +188,6 @@ CATEGORY_TREE = [
     },
 ]
 
-# 类目 ID → 路径映射（后端自动生成）
 CATEGORY_MAP = {}
 def build_category_map(tree, parent_path=None):
     if parent_path is None:
@@ -133,18 +205,6 @@ def build_category_map(tree, parent_path=None):
             build_category_map(node["children"], path)
 
 build_category_map(CATEGORY_TREE)
-
-def get_leaf_category_id(node_id):
-    for p in all_categories_flat:
-        if p == node_id:
-            return node_id
-    return node_id
-
-def is_leaf_category(node_id):
-    node = find_category_node(node_id)
-    if not node:
-        return False
-    return not node.get("children")
 
 def find_category_node(node_id, tree=None):
     if tree is None:
@@ -203,7 +263,7 @@ def save_products(products):
 products = load_products()
 
 # ============================================================
-# 商家级自定义标签
+# 标签
 # ============================================================
 DEFAULT_TAGS = [
     {"id": "tag_1", "name": "春茶", "color": "#0d7c4f"},
@@ -270,6 +330,10 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "update_product": "更新商品", "create_product": "创建商品",
         "create_tag": "新建标签", "delete_tag": "删除标签",
         "sync_materials": "同步素材到商品",
+        "upload_temp": "上传临时文件",
+        "extract_frames": "视频抽帧",
+        "decompose_video": "视频反解",
+        "parse_generation": "AI 意图识别",
     }
     logs = load_logs()
     log_entry = {
@@ -308,7 +372,7 @@ def find_product(name: str):
     return None
 
 # ============================================================
-# AI 工具（33 个，保持不变）
+# AI 工具（33 个）
 # ============================================================
 tools = [
     {"type": "function", "function": {"name": "update_price", "description": "修改指定商品的价格。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}, "new_price": {"type": "number"}}, "required": ["product_name", "new_price"]}}},
@@ -375,15 +439,97 @@ async def parse_intent(req: ChatRequest):
         return {"type": "error", "text": str(e)}
 
 # ============================================================
+# ★ 新增：AI 生成意图识别
+# ============================================================
+@app.post("/api/ai/parse-generation")
+async def parse_generation(req: dict):
+    """
+    分析用户输入，判断生成意图：
+    - kind: images / video / poster / null
+    - is_bound: 是否绑定商品
+    - product_name: 绑定商品名（仅 is_bound=true 时有效）
+    - free_theme: 自由主题（is_bound=false 时有效）
+    - poster_type: 海报类型
+    """
+    text = req.get('text', '')
+    available_products = req.get('available_products', [])
+    has_reference = req.get('has_reference', False)
+    ref_types = req.get('ref_types', [])
+
+    if not text:
+        return {"kind": None, "is_bound": False, "product_name": ""}
+
+    products_str = '、'.join(available_products) if available_products else '（暂无）'
+    ref_str = f'有（{"/".join(ref_types)}）' if has_reference else '无'
+
+    prompt = f"""你是电商素材生成助手。请分析用户输入，判断生成意图。
+
+用户输入：{text}
+有无参考素材：{ref_str}
+可用商品列表：{products_str}
+
+请严格返回以下 JSON 格式（不要 markdown 代码块，不要任何解释）：
+{{
+  "kind": "images" | "video" | "poster" | null,
+  "is_bound": true / false,
+  "product_name": "商品名，仅当 is_bound=true 时填，必须是上面列表中的一个；否则填空字符串",
+  "count": 数字（图片张数，默认1）,
+  "seconds": "视频时长字符串，默认5",
+  "poster_type": "促销海报 | 新品海报 | 国潮海报 | 简约海报 | 自由海报",
+  "free_theme": "自由主题关键词，如'茶叶'、'母亲节'、'国潮'",
+  "ai_suggestion": "一句给用户的建议"
+}}
+
+判断规则：
+1. 若文本含"给XXX生成/为XXX制作/帮XXX做"，且 XXX 在商品列表中 → is_bound=true, product_name=XXX
+2. 若文本含"给XXX生成"，但 XXX 不在列表中 → is_bound=false, free_theme=XXX
+3. 若文本无明确商品指向 → is_bound=false，kind 根据文本判断
+4. 若用户上传了参考素材 → 优先推荐生成同类素材
+5. 若文本含"海报" → kind=poster；含"视频" → kind=video；含"图/主图" → kind=images
+6. 若文本既无"生成"意图也无"操作"意图 → kind=null
+
+示例：
+- "图片+文字参考图生成视频" → {{"kind": "video", "is_bound": false, "product_name": "", "seconds": "5", "free_theme": "", "ai_suggestion": "基于参考图生成视频"}}
+- "生成一张茶叶促销海报" → {{"kind": "poster", "is_bound": false, "product_name": "", "poster_type": "促销海报", "free_theme": "茶叶"}}
+- "生成3张主图" → {{"kind": "images", "is_bound": false, "product_name": "", "count": 3}}
+- "给云山茶叶礼盒生成3张主图" → {{"kind": "images", "is_bound": true, "product_name": "云山茶叶礼盒", "count": 3}}
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith('```'):
+            parts = raw.split('```')
+            if len(parts) >= 2:
+                raw = parts[1]
+                if raw.startswith('json'):
+                    raw = raw[4:]
+                raw = raw.strip()
+
+        result = json.loads(raw)
+        add_log("parse_generation", {"text": text[:50]}, f"kind={result.get('kind')}", True)
+        return result
+    except Exception as e:
+        print(f"[parse_generation] 失败: {e}")
+        # 降级：返回 null kind，让前端走正则
+        return {
+            "kind": None,
+            "is_bound": False,
+            "product_name": "",
+            "error": str(e)
+        }
+
+# ============================================================
 # 商品数据接口
 # ============================================================
 @app.get("/api/products")
 async def get_products():
     return {"products": products}
 
-# ============================================================
-# 类目树接口
-# ============================================================
 @app.get("/api/categories/tree")
 async def get_category_tree():
     return {"categories": CATEGORY_TREE}
@@ -392,9 +538,6 @@ async def get_category_tree():
 async def get_category_map():
     return {"map": CATEGORY_MAP}
 
-# ============================================================
-# 标签接口
-# ============================================================
 @app.get("/api/tags")
 async def get_tags():
     return {"tags": tags_store}
@@ -432,9 +575,6 @@ async def delete_tag(req: TagDeleteRequest):
     add_log("delete_tag", {"tag_id": req.tag_id}, f"已删除标签「{tag['name']}」", True)
     return {"success": True, "message": f"已删除标签「{tag['name']}」"}
 
-# ============================================================
-# 日志接口
-# ============================================================
 @app.get("/api/logs")
 async def get_logs():
     return {"logs": load_logs()}
@@ -890,7 +1030,7 @@ async def delete_product_api(req: ProductDeleteRequest):
     return {"success": True, "message": f"已删除「{name}」"}
 
 # ============================================================
-# 新增：批量同步素材到商品（支持单选 / 多选）
+# 批量同步素材到商品
 # ============================================================
 class SyncMaterialRequest(BaseModel):
     product_names: List[str]
@@ -898,20 +1038,13 @@ class SyncMaterialRequest(BaseModel):
     sub_images: Optional[List[str]] = None
     video: Optional[str] = None
     detail_html: Optional[str] = None
-    mode: str = "merge"  # merge=合并/追加；replace=覆盖
+    mode: str = "merge"
 
 @app.post("/api/materials/sync")
 async def sync_materials(req: SyncMaterialRequest):
-    """
-    把一组素材同步到一个或多个商品。
-    - product_names 长度为 1 → 单选
-    - product_names 长度为 N → 多选
-    - mode=merge: 副图追加（最多 5 张）；mode=replace: 副图覆盖
-    - 主图 / 视频 / 详情页：始终覆盖（单值字段）
-    """
     global products
     if not req.product_names:
-        return {"success": False, "message": "请至少选择一个商品"}
+        return {"success": False, "all_ok": False, "message": "请至少选择一个商品"}
 
     results = []
     for name in req.product_names:
@@ -921,11 +1054,9 @@ async def sync_materials(req: SyncMaterialRequest):
             continue
 
         try:
-            # 主图
             if req.main_image:
                 p["main_image"] = req.main_image
 
-            # 副图：merge 追加 / replace 覆盖，最多 5 张
             if req.sub_images:
                 if req.mode == "replace":
                     p["sub_images"] = req.sub_images[:5]
@@ -933,11 +1064,9 @@ async def sync_materials(req: SyncMaterialRequest):
                     existing = p.get("sub_images", [])
                     p["sub_images"] = (existing + req.sub_images)[:5]
 
-            # 视频
             if req.video:
                 p["video"] = req.video
 
-            # 详情页
             if req.detail_html:
                 p["detail_html"] = req.detail_html
 
@@ -948,18 +1077,324 @@ async def sync_materials(req: SyncMaterialRequest):
     save_products(products)
     ok_count = len([r for r in results if r["ok"]])
     fail_count = len(results) - ok_count
+    all_ok = (fail_count == 0)
+
     add_log(
         "sync_materials",
         {"products": req.product_names, "mode": req.mode},
         f"已同步素材到 {ok_count} 个商品（失败 {fail_count}）",
-        fail_count == 0
+        all_ok
     )
     return {
         "success": True,
+        "all_ok": all_ok,
+        "ok_count": ok_count,
+        "fail_count": fail_count,
         "message": f"同步完成：成功 {ok_count} 个，失败 {fail_count} 个",
         "results": results
     }
 
+# ============================================================
+# 临时图床
+# ============================================================
+@app.get("/temp/{file_id}")
+async def serve_temp_file(file_id: str):
+    _cleanup_expired()
+    info = temp_meta.get(file_id)
+    if not info:
+        return JSONResponse({"error": "file not found or expired"}, status_code=404)
+    file_path = Path(info["path"])
+    if not file_path.exists():
+        return JSONResponse({"error": "file missing"}, status_code=404)
+    return FileResponse(
+        path=str(file_path),
+        media_type=info.get("content_type", "application/octet-stream"),
+        filename=info.get("filename", file_id)
+    )
+
+@app.post("/api/upload/temp")
+async def upload_temp_file(
+    request: Request,
+    file: UploadFile = File(...),
+    purpose: str = Form("reference")
+):
+    _cleanup_expired()
+
+    content = await file.read()
+    if len(content) > TEMP_MAX_FILE_SIZE:
+        return {"success": False, "message": f"文件不能超过 {TEMP_MAX_FILE_SIZE // (1024*1024)}MB"}
+
+    ctype = file.content_type or ""
+    is_image = ctype in TEMP_ALLOWED_IMAGE
+    is_video = ctype in TEMP_ALLOWED_VIDEO
+    if not (is_image or is_video):
+        return {"success": False, "message": f"不支持的文件类型：{ctype}"}
+
+    file_id = uuid.uuid4().hex[:16]
+    ext = Path(file.filename or "").suffix.lower()
+    if not ext:
+        ext = ".jpg" if is_image else ".mp4"
+    stored_name = f"{file_id}{ext}"
+    today = datetime.now().strftime("%Y-%m-%d")
+    day_dir = TEMP_UPLOAD_DIR / today
+    day_dir.mkdir(parents=True, exist_ok=True)
+    file_path = day_dir / stored_name
+
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    temp_meta[file_id] = {
+        "id": file_id,
+        "path": str(file_path),
+        "filename": file.filename or stored_name,
+        "content_type": ctype,
+        "size": len(content),
+        "purpose": purpose,
+        "created_at": time.time(),
+        "is_image": is_image,
+        "is_video": is_video
+    }
+    _save_temp_meta(temp_meta)
+
+    base_url = str(request.base_url).rstrip("/")
+    public_url = f"{base_url}/temp/{file_id}"
+
+    add_log("upload_temp", {"file_id": file_id, "purpose": purpose}, f"已上传临时文件 {file_id}", True)
+
+    return {
+        "success": True,
+        "file_id": file_id,
+        "url": public_url,
+        "content_type": ctype,
+        "size": len(content),
+        "expires_in": TEMP_FILE_TTL
+    }
+
+@app.post("/api/upload/temp/batch")
+async def upload_temp_batch(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    purpose: str = Form("reference")
+):
+    if len(files) > 10:
+        return {"success": False, "message": "单次最多上传 10 个文件"}
+
+    results = []
+    for f in files:
+        single = await upload_temp_file(request, f, purpose)
+        results.append(single)
+
+    ok_count = len([r for r in results if r.get("success")])
+    return {
+        "success": True,
+        "message": f"上传完成：成功 {ok_count}/{len(results)}",
+        "results": results
+    }
+
+@app.post("/api/upload/temp/cleanup")
+async def cleanup_temp_manual():
+    before = len(temp_meta)
+    _cleanup_expired()
+    after = len(temp_meta)
+    return {"success": True, "message": f"已清理 {before - after} 个过期文件"}
+
+# ============================================================
+# 视频抽帧（服务端，OpenCV 可选）
+# ============================================================
+class ExtractFramesRequest(BaseModel):
+    video_url: Optional[str] = None
+    count: int = 3
+
+@app.post("/api/video/extract-frames")
+async def extract_frames(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    video_url: Optional[str] = Form(None),
+    count: int = Form(3)
+):
+    video_bytes = None
+    if file is not None:
+        video_bytes = await file.read()
+    elif video_url:
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                r = await http.get(video_url)
+                if r.status_code != 200:
+                    return {"success": False, "message": f"下载视频失败：HTTP {r.status_code}"}
+                video_bytes = r.content
+        except Exception as e:
+            return {"success": False, "message": f"下载视频失败：{e}"}
+    else:
+        return {"success": False, "message": "请上传视频文件或提供 video_url"}
+
+    if len(video_bytes) > TEMP_MAX_FILE_SIZE * 2:
+        return {"success": False, "message": f"视频不能超过 {TEMP_MAX_FILE_SIZE * 2 // (1024*1024)}MB"}
+
+    frames_data = None
+    try:
+        import cv2
+        import numpy as np
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(video_bytes)
+            tmp_path = tmp.name
+        try:
+            cap = cv2.VideoCapture(tmp_path)
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+            frames_data = []
+            for i in range(count):
+                pos = int(total * i / max(count - 1, 1)) if count > 1 else total // 2
+                cap.set(cv2.CAP_PROP_POS_FRAMES, min(pos, total - 1))
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                h, w = frame.shape[:2]
+                if w > 720:
+                    new_w = 720
+                    new_h = int(h * 720 / w)
+                    frame = cv2.resize(frame, (new_w, new_h))
+                _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                frames_data.append(buf.tobytes())
+            cap.release()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    except ImportError:
+        return {
+            "success": False,
+            "message": "服务端未安装 OpenCV，请在前端抽帧后再上传",
+            "fallback": "client_side"
+        }
+
+    if not frames_data:
+        return {"success": False, "message": "抽帧失败，未获取到有效帧"}
+
+    base_url = str(request.base_url).rstrip("/")
+    frame_urls = []
+    for idx, data in enumerate(frames_data):
+        file_id = uuid.uuid4().hex[:16]
+        today = datetime.now().strftime("%Y-%m-%d")
+        day_dir = TEMP_UPLOAD_DIR / today
+        day_dir.mkdir(parents=True, exist_ok=True)
+        file_path = day_dir / f"{file_id}.jpg"
+        with open(file_path, "wb") as f:
+            f.write(data)
+
+        temp_meta[file_id] = {
+            "id": file_id,
+            "path": str(file_path),
+            "filename": f"keyframe_{idx+1}.jpg",
+            "content_type": "image/jpeg",
+            "size": len(data),
+            "purpose": "keyframe",
+            "created_at": time.time(),
+            "is_image": True,
+            "is_video": False
+        }
+        frame_urls.append(f"{base_url}/temp/{file_id}")
+    _save_temp_meta(temp_meta)
+
+    add_log("extract_frames", {"count": len(frame_urls)}, f"已抽取 {len(frame_urls)} 帧", True)
+
+    return {
+        "success": True,
+        "count": len(frame_urls),
+        "frames": frame_urls
+    }
+
+# ============================================================
+# 多模态反解
+# ============================================================
+class DecomposeRequest(BaseModel):
+    keyframe_urls: List[str]
+    product_name: Optional[str] = ""
+
+@app.post("/api/video/decompose")
+async def decompose_video(req: DecomposeRequest):
+    if not req.keyframe_urls:
+        return {"success": False, "message": "请至少提供 1 张关键帧"}
+
+    system_prompt = """你是专业的电商短视频分析师。
+用户会提供几帧参考视频的画面，请你反解出：
+1. **画面内容**：商品是什么、场景、构图、色调、光影
+2. **运镜方式**：镜头运动（推/拉/摇/移/跟/升降/环绕）、景别（特写/中景/全景）
+3. **节奏与转场**：快慢、是否有慢动作、转场方式
+4. **生成 prompt**：把以上内容整合成一段 80-150 字的中文 prompt，可直接用于 AI 视频生成
+
+严格输出以下 JSON 格式（不要 markdown 代码块）：
+{
+  "content": "画面内容描述",
+  "camera": "运镜方式描述",
+  "rhythm": "节奏与转场描述",
+  "prompt": "可直接用于视频生成的完整 prompt",
+  "style_tags": ["标签1", "标签2"]
+}"""
+
+    user_content = [
+        {"type": "text", "text": f"目标商品：{req.product_name or '未指定'}\n请分析以下 {len(req.keyframe_urls)} 张关键帧："}
+    ]
+    for url in req.keyframe_urls[:5]:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": url}
+        })
+
+    multimodal_models = [
+        os.getenv("AGNES_VL_MODEL", "agnes-vl-2.0"),
+        "agnes-3.0-flash",
+    ]
+    last_err = None
+    for model_name in multimodal_models:
+        try:
+            response = agnes_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                temperature=0.3,
+                max_tokens=800
+            )
+            raw = response.choices[0].message.content.strip()
+
+            if raw.startswith("```"):
+                parts = raw.split("```")
+                if len(parts) >= 2:
+                    raw = parts[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                    raw = raw.strip()
+
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError:
+                result = {
+                    "content": raw,
+                    "camera": "",
+                    "rhythm": "",
+                    "prompt": raw,
+                    "style_tags": []
+                }
+
+            add_log("decompose_video", {"count": len(req.keyframe_urls), "model": model_name},
+                    f"反解成功", True)
+            return {"success": True, "analysis": result, "model": model_name}
+
+        except Exception as e:
+            last_err = str(e)
+            print(f"[decompose] model {model_name} 失败: {e}")
+            continue
+
+    add_log("decompose_video", {"count": len(req.keyframe_urls)},
+            f"反解失败：{last_err}", False)
+    return {"success": False, "message": f"反解失败：{last_err}"}
+
+# ============================================================
+# CSV 导出 & 根路径
+# ============================================================
 @app.get("/api/export/csv")
 async def export_csv():
     lines = ["ID,商品名称,规格,SKU,价格,库存,分类,平台,状态,销量,评价"]
@@ -974,7 +1409,7 @@ async def export_csv():
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "AI 助手后端服务运行中"}
+    return {"status": "ok", "message": "AI 助手后端服务运行中（含 AI 意图识别 + 临时图床 + 视频反解）"}
 
 
 if __name__ == "__main__":
