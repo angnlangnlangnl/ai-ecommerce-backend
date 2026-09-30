@@ -30,6 +30,17 @@ TEMP_ALLOWED_VIDEO = {"video/mp4", "video/webm", "video/quicktime"}
 
 TEMP_META_FILE = TEMP_UPLOAD_DIR / "_meta.json"
 
+# ============================================================
+# ★ 改动 1：商品素材持久化目录
+# ============================================================
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads")).resolve()
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# 子目录：主图 / 副图 / 视频 / 详情图
+for _sub in ("main", "sub", "video", "detail"):
+    (UPLOAD_DIR / _sub).mkdir(parents=True, exist_ok=True)
+
+
 def _load_temp_meta():
     if TEMP_META_FILE.exists():
         try:
@@ -39,6 +50,7 @@ def _load_temp_meta():
             return {}
     return {}
 
+
 def _save_temp_meta(meta):
     try:
         with open(TEMP_META_FILE, "w", encoding="utf-8") as f:
@@ -46,7 +58,9 @@ def _save_temp_meta(meta):
     except Exception:
         pass
 
+
 temp_meta = _load_temp_meta()
+
 
 def _cleanup_expired():
     now = time.time()
@@ -64,6 +78,7 @@ def _cleanup_expired():
     if expired:
         _save_temp_meta(temp_meta)
 
+
 async def _periodic_cleanup():
     while True:
         try:
@@ -72,11 +87,13 @@ async def _periodic_cleanup():
             print("[cleanup] error:", e)
         await asyncio.sleep(600)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task = asyncio.create_task(_periodic_cleanup())
     yield
     task.cancel()
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -86,6 +103,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ★ 改动 2：挂载商品素材静态目录
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 # DeepSeek（文本）
 client = OpenAI(
@@ -189,6 +209,8 @@ CATEGORY_TREE = [
 ]
 
 CATEGORY_MAP = {}
+
+
 def build_category_map(tree, parent_path=None):
     if parent_path is None:
         parent_path = []
@@ -204,7 +226,9 @@ def build_category_map(tree, parent_path=None):
         if "children" in node:
             build_category_map(node["children"], path)
 
+
 build_category_map(CATEGORY_TREE)
+
 
 def find_category_node(node_id, tree=None):
     if tree is None:
@@ -217,6 +241,7 @@ def find_category_node(node_id, tree=None):
             if found:
                 return found
     return None
+
 
 all_categories_flat = list(CATEGORY_MAP.keys())
 
@@ -233,6 +258,7 @@ DEFAULT_PRODUCTS = [
     {"id": 7, "name": "手工红糖姜茶", "price": 29.9, "stock": 210, "category": "食品", "platform": "淘宝", "status": "在售", "sales": 3456, "icon": "fa-candy-cane", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "300g/盒", "sku": "JC-2026-007", "rating": "4.9星", "subcat": "茶饮", "third": "礼盒装", "tags": ["养生", "暖身"], "category_path": ["cat_food", "cat_food_health", "cat_food_health_tea"]},
     {"id": 8, "name": "云山国风丝巾", "price": 68, "stock": 76, "category": "文创", "platform": "拼多多", "status": "在售", "sales": 789, "icon": "fa-palette", "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": "90×90cm", "sku": "SJ-2026-008", "rating": "4.8星", "subcat": "编织", "third": "手工", "tags": ["国风", "送礼"], "category_path": ["cat_cultural", "cat_cultural_fabric", "cat_cultural_fabric_scarf"]},
 ]
+
 
 def load_products():
     if os.path.exists(DATA_FILE):
@@ -256,9 +282,11 @@ def load_products():
             return DEFAULT_PRODUCTS
     return DEFAULT_PRODUCTS
 
+
 def save_products(products):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(products, f, ensure_ascii=False, indent=2)
+
 
 products = load_products()
 
@@ -278,6 +306,7 @@ DEFAULT_TAGS = [
     {"id": "tag_10", "name": "礼盒", "color": "#7b4fa0"},
 ]
 
+
 def load_tags():
     if os.path.exists(TAG_FILE):
         try:
@@ -287,9 +316,11 @@ def load_tags():
             return DEFAULT_TAGS
     return DEFAULT_TAGS
 
+
 def save_tags(tags):
     with open(TAG_FILE, "w", encoding="utf-8") as f:
         json.dump(tags, f, ensure_ascii=False, indent=2)
+
 
 tags_store = load_tags()
 
@@ -305,10 +336,12 @@ def load_logs():
             return []
     return []
 
+
 def save_logs(logs):
     logs = logs[:LOG_MAX]
     with open(LOG_FILE, "w", encoding="utf-8") as f:
         json.dump(logs, f, ensure_ascii=False, indent=2)
+
 
 def add_log(action_type: str, args: dict, result: str, success: bool):
     type_names = {
@@ -348,6 +381,7 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
     logs.insert(0, log_entry)
     save_logs(logs)
 
+
 def find_product(name: str):
     if not name:
         return None
@@ -370,6 +404,32 @@ def find_product(name: str):
                 if val in p["name"]:
                     return p
     return None
+
+
+# ============================================================
+# ★ 改动 3：新增工具函数 —— 根据 URL 反查并删除文件
+# ============================================================
+def _delete_file_by_url(url: str):
+    """
+    从公开 URL 反查文件路径并删除。
+    只处理包含 /uploads/ 的 URL，其他（外链、base64、空值）忽略。
+    """
+    if not url or not isinstance(url, str):
+        return
+    if "/uploads/" not in url:
+        return
+    try:
+        relative = url.split("/uploads/", 1)[1]
+        # 去掉 query / fragment
+        relative = relative.split("?", 1)[0].split("#", 1)[0]
+        file_path = (UPLOAD_DIR / relative).resolve()
+        # 安全检查：防止路径穿越
+        if not str(file_path).startswith(str(UPLOAD_DIR)):
+            return
+        file_path.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"[_delete_file_by_url] 删除失败 {url}: {e}")
+
 
 # ============================================================
 # AI 工具（33 个）
@@ -410,8 +470,10 @@ tools = [
     {"type": "function", "function": {"name": "clear_all_images", "description": "清空某商品的所有图片。", "parameters": {"type": "object", "properties": {"product_name": {"type": "string"}}, "required": ["product_name"]}}},
 ]
 
+
 class ChatRequest(BaseModel):
     text: str
+
 
 @app.post("/api/ai/parse")
 async def parse_intent(req: ChatRequest):
@@ -437,6 +499,7 @@ async def parse_intent(req: ChatRequest):
             return {"type": "chat", "text": msg.content}
     except Exception as e:
         return {"type": "error", "text": str(e)}
+
 
 # ============================================================
 # ★ 新增：AI 生成意图识别
@@ -515,13 +578,13 @@ async def parse_generation(req: dict):
         return result
     except Exception as e:
         print(f"[parse_generation] 失败: {e}")
-        # 降级：返回 null kind，让前端走正则
         return {
             "kind": None,
             "is_bound": False,
             "product_name": "",
             "error": str(e)
         }
+
 
 # ============================================================
 # 商品数据接口
@@ -530,21 +593,26 @@ async def parse_generation(req: dict):
 async def get_products():
     return {"products": products}
 
+
 @app.get("/api/categories/tree")
 async def get_category_tree():
     return {"categories": CATEGORY_TREE}
+
 
 @app.get("/api/categories/map")
 async def get_category_map():
     return {"map": CATEGORY_MAP}
 
+
 @app.get("/api/tags")
 async def get_tags():
     return {"tags": tags_store}
 
+
 class TagCreateRequest(BaseModel):
     name: str
     color: Optional[str] = "#4dabf7"
+
 
 @app.post("/api/tags/create")
 async def create_tag(req: TagCreateRequest):
@@ -561,8 +629,10 @@ async def create_tag(req: TagCreateRequest):
     add_log("create_tag", {"name": name}, f"已新建标签「{name}」", True)
     return {"success": True, "message": f"已新建标签「{name}」", "tag": new_tag}
 
+
 class TagDeleteRequest(BaseModel):
     tag_id: str
+
 
 @app.post("/api/tags/delete")
 async def delete_tag(req: TagDeleteRequest):
@@ -575,13 +645,16 @@ async def delete_tag(req: TagDeleteRequest):
     add_log("delete_tag", {"tag_id": req.tag_id}, f"已删除标签「{tag['name']}」", True)
     return {"success": True, "message": f"已删除标签「{tag['name']}」"}
 
+
 @app.get("/api/logs")
 async def get_logs():
     return {"logs": load_logs()}
 
+
 class ExecuteRequest(BaseModel):
     type: str
     args: dict
+
 
 @app.post("/api/ai/execute")
 async def execute_action(req: ExecuteRequest):
@@ -594,6 +667,7 @@ async def execute_action(req: ExecuteRequest):
         msg = f"执行失败：{str(e)}"
         add_log(req.type, req.args, msg, False)
         return {"success": False, "message": msg}
+
 
 def do_action(t, args):
     if t == "update_price":
@@ -796,7 +870,13 @@ def do_action(t, args):
         category = args.get("category"); matched = [p for p in products if p["category"] == category]
         if not matched: return {"success": False, "message": f"没有找到分类为「{category}」的商品"}
         names = "、".join([p["name"] for p in matched])
-        for p in matched: products.remove(p)
+        # ★ 改动 4：删除商品时同时清理它的素材文件
+        for p in matched:
+            _delete_file_by_url(p.get("main_image", ""))
+            _delete_file_by_url(p.get("video", ""))
+            for sub in p.get("sub_images", []):
+                _delete_file_by_url(sub)
+            products.remove(p)
         save_products(products)
         return {"success": True, "message": f"已删除「{category}」分类共 {len(matched)} 个商品：\n{names}"}
 
@@ -822,7 +902,10 @@ def do_action(t, args):
         p = find_product(args.get("product_name"))
         if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
         if not p.get("main_image"): return {"success": False, "message": f"「{p['name']}」没有主图"}
-        p["main_image"] = ""; save_products(products)
+        old_url = p["main_image"]
+        p["main_image"] = ""
+        save_products(products)
+        _delete_file_by_url(old_url)
         return {"success": True, "message": f"已删除「{p['name']}」的主图"}
 
     if t == "remove_sub_image":
@@ -831,47 +914,64 @@ def do_action(t, args):
         index = args.get("index", 1)
         subs = p.get("sub_images", [])
         if index < 1 or index > len(subs): return {"success": False, "message": f"副图序号 {index} 不存在，当前共 {len(subs)} 张"}
-        subs.pop(index - 1); p["sub_images"] = subs; save_products(products)
+        old_url = subs.pop(index - 1)
+        p["sub_images"] = subs
+        save_products(products)
+        _delete_file_by_url(old_url)
         return {"success": True, "message": f"已删除「{p['name']}」的第 {index} 张副图，剩余 {len(subs)} 张"}
 
     if t == "clear_sub_images":
         p = find_product(args.get("product_name"))
         if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
-        count = len(p.get("sub_images", []))
-        if count == 0: return {"success": False, "message": f"「{p['name']}」没有副图"}
-        p["sub_images"] = []; save_products(products)
-        return {"success": True, "message": f"已清空「{p['name']}」的所有副图（共 {count} 张）"}
+        subs = p.get("sub_images", [])
+        if len(subs) == 0: return {"success": False, "message": f"「{p['name']}」没有副图"}
+        for url in subs:
+            _delete_file_by_url(url)
+        p["sub_images"] = []
+        save_products(products)
+        return {"success": True, "message": f"已清空「{p['name']}」的所有副图（共 {len(subs)} 张）"}
 
     if t == "clear_all_images":
         p = find_product(args.get("product_name"))
         if not p: return {"success": False, "message": f"未找到商品：{args.get('product_name')}"}
         main_exist = bool(p.get("main_image")); sub_count = len(p.get("sub_images", []))
         if not main_exist and sub_count == 0: return {"success": False, "message": f"「{p['name']}」没有任何图片"}
-        p["main_image"] = ""; p["sub_images"] = []; save_products(products)
+        _delete_file_by_url(p.get("main_image", ""))
+        for url in p.get("sub_images", []):
+            _delete_file_by_url(url)
+        p["main_image"] = ""; p["sub_images"] = []
+        save_products(products)
         return {"success": True, "message": f"已清空「{p['name']}」的所有图片"}
 
     return {"success": False, "message": f"未知操作类型：{t}"}
 
+
 # ============================================================
 # 图片上传 / 删除
 # ============================================================
+# ★ 改动 5：整个 upload_image 接口重写 —— 落盘 + 返回 URL
 @app.post("/api/images/upload")
 async def upload_image(
+    request: Request,
     product_name: str = Form(...),
     image_type: str = Form(...),
     file: UploadFile = File(...)
 ):
+    # ---------- 1. 校验商品（detail 类型除外） ----------
+    p = None
     if image_type != "detail":
         p = find_product(product_name)
         if not p:
             return {"success": False, "message": f"未找到商品：{product_name}"}
 
+    # ---------- 2. 读取 + 大小校验 ----------
     content = await file.read()
     max_size = 50 * 1024 * 1024 if image_type == "video" else 2 * 1024 * 1024
     if len(content) > max_size:
         limit_text = "50MB" if image_type == "video" else "2MB"
         return {"success": False, "message": f"文件不能超过 {limit_text}"}
 
+    # ---------- 3. MIME 校验 ----------
     if image_type == "video":
         if not file.content_type or not file.content_type.startswith("video/"):
             return {"success": False, "message": "只支持视频文件"}
@@ -879,36 +979,70 @@ async def upload_image(
         if not file.content_type or not file.content_type.startswith("image/"):
             return {"success": False, "message": "只支持图片文件"}
 
-    b64 = base64.b64encode(content).decode("utf-8")
-    data_url = f"data:{file.content_type};base64,{b64}"
+    # ---------- 4. 落盘 ----------
+    if image_type == "sub":
+        safe_name = "".join(c for c in product_name if c.isalnum() or c in "-_") or "unknown"
+        sub_dir = UPLOAD_DIR / "sub" / safe_name
+        sub_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        sub_dir = UPLOAD_DIR / image_type
 
+    file_id = uuid.uuid4().hex[:16]
+    ext = Path(file.filename or "").suffix.lower()
+    if not ext:
+        ext = ".mp4" if image_type == "video" else ".jpg"
+    stored_name = f"{file_id}{ext}"
+    file_path = sub_dir / stored_name
+
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # ---------- 5. 生成公开 URL ----------
+    base_url = str(request.base_url).rstrip("/")
+    if image_type == "sub":
+        safe_name = "".join(c for c in product_name if c.isalnum() or c in "-_") or "unknown"
+        public_url = f"{base_url}/uploads/sub/{safe_name}/{stored_name}"
+    else:
+        public_url = f"{base_url}/uploads/{image_type}/{stored_name}"
+
+    # ---------- 6. 更新商品字段 ----------
     if image_type == "main":
-        p["main_image"] = data_url
+        old_url = p.get("main_image", "")
+        p["main_image"] = public_url
         save_products(products)
+        if old_url and old_url != public_url:
+            _delete_file_by_url(old_url)
         add_log("set_main_image", {"product_name": product_name}, f"已设置「{p['name']}」的主图", True)
-        return {"success": True, "message": f"已设置「{p['name']}」的主图"}
+        return {"success": True, "message": f"已设置「{p['name']}」的主图", "url": public_url}
 
     elif image_type == "sub":
         subs = p.get("sub_images", [])
         if len(subs) >= 5:
+            file_path.unlink(missing_ok=True)
             return {"success": False, "message": f"「{p['name']}」副图已达上限（5 张）"}
-        subs.append(data_url)
+        subs.append(public_url)
         p["sub_images"] = subs
         save_products(products)
         add_log("add_sub_image", {"product_name": product_name}, f"已为「{p['name']}」添加第 {len(subs)} 张副图", True)
-        return {"success": True, "message": f"已为「{p['name']}」添加第 {len(subs)} 张副图"}
+        return {"success": True, "message": f"已为「{p['name']}」添加第 {len(subs)} 张副图", "url": public_url}
 
     elif image_type == "video":
-        p["video"] = data_url
+        old_url = p.get("video", "")
+        p["video"] = public_url
         save_products(products)
+        if old_url and old_url != public_url:
+            _delete_file_by_url(old_url)
         add_log("set_video", {"product_name": product_name}, f"已设置「{p['name']}」的视频", True)
-        return {"success": True, "message": f"已设置「{p['name']}」的视频"}
+        return {"success": True, "message": f"已设置「{p['name']}」的视频", "url": public_url}
 
     elif image_type == "detail":
-        return {"success": True, "url": data_url, "message": "图片已上传"}
+        return {"success": True, "url": public_url, "message": "图片已上传"}
 
+    file_path.unlink(missing_ok=True)
     return {"success": False, "message": "image_type 必须是 main / sub / video / detail"}
 
+
+# ★ 改动 6：删除接口 —— 同时清理磁盘文件
 @app.post("/api/images/delete")
 async def delete_image(payload: dict):
     product_name = payload.get("product_name")
@@ -922,7 +1056,10 @@ async def delete_image(payload: dict):
     if image_type == "main":
         if not p.get("main_image"):
             return {"success": False, "message": "没有主图可删除"}
-        p["main_image"] = ""; save_products(products)
+        old_url = p["main_image"]
+        p["main_image"] = ""
+        save_products(products)
+        _delete_file_by_url(old_url)
         add_log("delete_main_image", {"product_name": product_name}, f"已删除「{p['name']}」的主图", True)
         return {"success": True, "message": f"已删除「{p['name']}」的主图"}
 
@@ -930,22 +1067,30 @@ async def delete_image(payload: dict):
         subs = p.get("sub_images", [])
         if index is None or index < 0 or index >= len(subs):
             return {"success": False, "message": "副图序号无效"}
-        subs.pop(index); p["sub_images"] = subs; save_products(products)
+        old_url = subs.pop(index)
+        p["sub_images"] = subs
+        save_products(products)
+        _delete_file_by_url(old_url)
         add_log("remove_sub_image", {"product_name": product_name, "index": index + 1}, f"已删除「{p['name']}」的第 {index + 1} 张副图", True)
         return {"success": True, "message": f"已删除「{p['name']}」的第 {index + 1} 张副图"}
 
     elif image_type == "video":
         if not p.get("video"):
             return {"success": False, "message": "没有视频可删除"}
-        p["video"] = ""; save_products(products)
+        old_url = p["video"]
+        p["video"] = ""
+        save_products(products)
+        _delete_file_by_url(old_url)
         add_log("delete_video", {"product_name": product_name}, f"已删除「{p['name']}」的视频", True)
         return {"success": True, "message": f"已删除「{p['name']}」的视频"}
 
     return {"success": False, "message": "image_type 必须是 main / sub / video"}
 
+
 class DetailRequest(BaseModel):
     product_name: str
     detail_html: str
+
 
 @app.post("/api/products/detail")
 async def save_detail(req: DetailRequest):
@@ -957,9 +1102,11 @@ async def save_detail(req: DetailRequest):
     add_log("update_detail", {"product_name": req.product_name}, f"已保存「{p['name']}」的图文详情", True)
     return {"success": True, "message": "详情已保存"}
 
+
 class ProductUpdateRequest(BaseModel):
     product_name: str
     fields: dict
+
 
 @app.post("/api/products/update")
 async def update_product(req: ProductUpdateRequest):
@@ -974,8 +1121,10 @@ async def update_product(req: ProductUpdateRequest):
     add_log("update_product", {"product_name": req.product_name}, f"已更新「{p['name']}」信息", True)
     return {"success": True, "message": f"已更新「{p['name']}」"}
 
+
 class ProductCreateRequest(BaseModel):
     fields: dict
+
 
 @app.post("/api/products/create")
 async def create_product(req: ProductCreateRequest):
@@ -1014,8 +1163,10 @@ async def create_product(req: ProductCreateRequest):
     add_log("create_product", {"name": name}, f"已新增「{name}」", True)
     return {"success": True, "message": f"已新增「{name}」", "product": new_product}
 
+
 class ProductDeleteRequest(BaseModel):
     product_name: str
+
 
 @app.post("/api/products/delete")
 async def delete_product_api(req: ProductDeleteRequest):
@@ -1024,10 +1175,16 @@ async def delete_product_api(req: ProductDeleteRequest):
     if not p:
         return {"success": False, "message": f"未找到商品：{req.product_name}"}
     name = p["name"]
+    # ★ 改动 7：删除商品时同时清理素材
+    _delete_file_by_url(p.get("main_image", ""))
+    _delete_file_by_url(p.get("video", ""))
+    for sub in p.get("sub_images", []):
+        _delete_file_by_url(sub)
     products.remove(p)
     save_products(products)
     add_log("delete_product", {"product_name": name}, f"已删除「{name}」", True)
     return {"success": True, "message": f"已删除「{name}」"}
+
 
 # ============================================================
 # 批量同步素材到商品
@@ -1039,6 +1196,7 @@ class SyncMaterialRequest(BaseModel):
     video: Optional[str] = None
     detail_html: Optional[str] = None
     mode: str = "merge"
+
 
 @app.post("/api/materials/sync")
 async def sync_materials(req: SyncMaterialRequest):
@@ -1055,17 +1213,26 @@ async def sync_materials(req: SyncMaterialRequest):
 
         try:
             if req.main_image:
+                old = p.get("main_image", "")
                 p["main_image"] = req.main_image
+                if old and old != req.main_image:
+                    _delete_file_by_url(old)
 
             if req.sub_images:
                 if req.mode == "replace":
+                    # 替换模式：先删旧的
+                    for old in p.get("sub_images", []):
+                        _delete_file_by_url(old)
                     p["sub_images"] = req.sub_images[:5]
                 else:
                     existing = p.get("sub_images", [])
                     p["sub_images"] = (existing + req.sub_images)[:5]
 
             if req.video:
+                old = p.get("video", "")
                 p["video"] = req.video
+                if old and old != req.video:
+                    _delete_file_by_url(old)
 
             if req.detail_html:
                 p["detail_html"] = req.detail_html
@@ -1094,6 +1261,7 @@ async def sync_materials(req: SyncMaterialRequest):
         "results": results
     }
 
+
 # ============================================================
 # 临时图床
 # ============================================================
@@ -1111,6 +1279,7 @@ async def serve_temp_file(file_id: str):
         media_type=info.get("content_type", "application/octet-stream"),
         filename=info.get("filename", file_id)
     )
+
 
 @app.post("/api/upload/temp")
 async def upload_temp_file(
@@ -1170,6 +1339,7 @@ async def upload_temp_file(
         "expires_in": TEMP_FILE_TTL
     }
 
+
 @app.post("/api/upload/temp/batch")
 async def upload_temp_batch(
     request: Request,
@@ -1191,6 +1361,7 @@ async def upload_temp_batch(
         "results": results
     }
 
+
 @app.post("/api/upload/temp/cleanup")
 async def cleanup_temp_manual():
     before = len(temp_meta)
@@ -1198,12 +1369,14 @@ async def cleanup_temp_manual():
     after = len(temp_meta)
     return {"success": True, "message": f"已清理 {before - after} 个过期文件"}
 
+
 # ============================================================
 # 视频抽帧（服务端，OpenCV 可选）
 # ============================================================
 class ExtractFramesRequest(BaseModel):
     video_url: Optional[str] = None
     count: int = 3
+
 
 @app.post("/api/video/extract-frames")
 async def extract_frames(
@@ -1305,12 +1478,14 @@ async def extract_frames(
         "frames": frame_urls
     }
 
+
 # ============================================================
 # 多模态反解
 # ============================================================
 class DecomposeRequest(BaseModel):
     keyframe_urls: List[str]
     product_name: Optional[str] = ""
+
 
 @app.post("/api/video/decompose")
 async def decompose_video(req: DecomposeRequest):
@@ -1392,6 +1567,7 @@ async def decompose_video(req: DecomposeRequest):
             f"反解失败：{last_err}", False)
     return {"success": False, "message": f"反解失败：{last_err}"}
 
+
 # ============================================================
 # CSV 导出 & 根路径
 # ============================================================
@@ -1407,9 +1583,10 @@ async def export_csv():
         headers={"Content-Disposition": "attachment; filename=products.csv"}
     )
 
+
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "AI 助手后端服务运行中（含 AI 意图识别 + 临时图床 + 视频反解）"}
+    return {"status": "ok", "message": "AI 助手后端服务运行中（含 AI 意图识别 + 临时图床 + 视频反解 + 素材持久化）"}
 
 
 if __name__ == "__main__":
