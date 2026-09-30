@@ -103,16 +103,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 挂载商品素材静态目录
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
-# DeepSeek（文本）
 client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
     base_url="https://api.deepseek.com"
 )
 
-# Agnes（多模态 + 视频/图片生成）
 agnes_client = OpenAI(
     api_key=os.getenv("AGNES_API_KEY", "sk-XmLjN9e3Mhh8wf"),
     base_url="https://apihub.agnes-ai.com/v1"
@@ -367,7 +364,7 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "decompose_video": "视频反解",
         "parse_generation": "AI 意图识别",
         "match_products": "商品智能匹配",
-        "market_analysis": "市场趋势分析",
+        "market_analysis": "AI电商策略分析",
     }
     logs = load_logs()
     log_entry = {
@@ -407,9 +404,6 @@ def find_product(name: str):
     return None
 
 
-# ============================================================
-# 根据 URL 反查并删除文件
-# ============================================================
 def _delete_file_by_url(url: str):
     if not url or not isinstance(url, str):
         return
@@ -496,9 +490,6 @@ async def parse_intent(req: ChatRequest):
         return {"type": "error", "text": str(e)}
 
 
-# ============================================================
-# AI 生成意图识别
-# ============================================================
 @app.post("/api/ai/parse-generation")
 async def parse_generation(req: dict):
     text = req.get('text', '')
@@ -574,7 +565,7 @@ async def parse_generation(req: dict):
 
 
 # ============================================================
-# ★ 新增 1：商品智能匹配（三级匹配）
+# 商品智能匹配（三级匹配）
 # ============================================================
 class MatchRequest(BaseModel):
     keywords: List[str]
@@ -583,19 +574,13 @@ class MatchRequest(BaseModel):
 
 @app.post("/api/products/match")
 async def match_products(req: MatchRequest):
-    """
-    三级匹配：
-    L1 精确匹配 → score 1.0
-    L2 语义匹配（AI）→ score 0.5~0.99
-    L3 分类/标签匹配 → score 0.5~0.7
-    """
     if not products or not req.keywords:
         return {"success": True, "matches": []}
 
     matches = []
     seen = set()
 
-    # ---------- L1: 精确匹配 ----------
+    # L1 精确匹配
     for kw in req.keywords:
         clean = kw.replace(" ", "").strip().lower()
         for p in products:
@@ -615,7 +600,7 @@ async def match_products(req: MatchRequest):
         add_log("match_products", {"keywords": req.keywords}, f"L1 精确匹配 {len(matches)} 个", True)
         return {"success": True, "matches": matches}
 
-    # ---------- L2: 语义匹配（AI） ----------
+    # L2 语义匹配（AI）
     products_summary = [
         {
             "name": p["name"],
@@ -693,7 +678,7 @@ async def match_products(req: MatchRequest):
     except Exception as e:
         print(f"[match_products] AI 语义匹配失败: {e}")
 
-    # ---------- L3: 分类/标签匹配（兜底） ----------
+    # L3 分类/标签兜底
     if not matches:
         for kw in req.keywords:
             clean = kw.replace(" ", "").lower()
@@ -729,7 +714,7 @@ async def match_products(req: MatchRequest):
 
 
 # ============================================================
-# ★ 新增 2：AI 分析市场环境（自由生成时用）
+# ★ AI 电商市场顾问（深度分析）
 # ============================================================
 class MarketAnalysisRequest(BaseModel):
     theme: str
@@ -740,7 +725,11 @@ class MarketAnalysisRequest(BaseModel):
 @app.post("/api/ai/market-analysis")
 async def market_analysis(req: MarketAnalysisRequest):
     """
-    分析当下市场环境，为自由生成提供 prompt 增强建议。
+    AI 扮演电商市场顾问：
+    1. 分析目标用户需求（谁在买、为什么买、什么时候买）
+    2. 分析市场趋势（当下什么风格火、什么元素过时）
+    3. 给出电商转化建议（怎么拍更能卖货）
+    4. 输出可直接使用的生成 prompt
     """
     if not req.theme:
         return {"success": False, "message": "缺少主题"}
@@ -749,41 +738,72 @@ async def market_analysis(req: MarketAnalysisRequest):
     month = now.month
     if month in (3, 4, 5):
         season_hint = "春季"
+        festival_hint = "母亲节/五一"
     elif month in (6, 7, 8):
         season_hint = "夏季"
+        festival_hint = "618/端午节/暑期"
     elif month in (9, 10, 11):
         season_hint = "秋季"
+        festival_hint = "中秋节/国庆/双11"
     else:
         season_hint = "冬季"
+        festival_hint = "双12/圣诞/元旦/年货节"
 
     kind_names = {"images": "商品主图", "video": "短视频", "poster": "宣传海报"}
     kind_name = kind_names.get(req.kind, "商品素材")
 
-    prompt = f"""你是资深电商视觉营销专家。用户想为「{req.theme}」生成{kind_name}。
-当前时间：{now.strftime('%Y年%m月%d日')}（{season_hint}）
+    prompt = f"""你是资深电商运营专家 + 视觉营销总监。用户想为「{req.theme}」生成{kind_name}。
+
+当前时间：{now.strftime('%Y年%m月%d日')}（{season_hint}，临近节日：{festival_hint}）
 目标平台：{req.platform}
+生成类型：{kind_name}
 
-请分析当下市场环境，给出：
-1. 这个主题在**当前季节/时间**最受欢迎的**视觉风格**（如国潮、极简、暖色调、新中式等）
-2. 该主题在**当下电商平台**的**主流消费场景**（如送礼、自用、囤货、换季）
-3. 应该突出的**核心卖点**（3个以内）
-4. 应该避免的**过时元素**（1-2个）
+请从**电商转化**角度深度分析，给出：
 
-严格返回 JSON（不要 markdown 代码块）：
+【1. 目标用户画像】
+- 谁最可能买「{req.theme}」这类商品？（年龄/性别/消费场景/购买动机）
+- 他们在什么场景下会下单？（自用/送礼/囤货/尝鲜）
+
+【2. 当下市场趋势】
+- 这个主题在 {season_hint} 最流行的视觉风格是什么？
+- 近期电商平台哪些元素/配色/构图最火？
+- 哪些风格已经过时、要避免？
+
+【3. 电商转化建议】
+- 主图第一眼要突出什么？（用户0.5秒决策）
+- 视频前3秒要抓什么？（跳出率最高）
+- 应该叠加什么利益点？（价格/品质/服务/情感）
+
+【4. 推荐视觉方案】
+- 具体配色（如"莫兰迪色系+焦糖色点缀"）
+- 具体构图（如"中心对称+留白30%"）
+- 具体光影（如"柔光箱打光+暖色调"）
+
+【5. 可直接使用的生成 Prompt】
+把以上内容整合成一段 100-150 字的 prompt（中英混排），可直接用于 AI 图片/视频生成。
+
+严格返回以下 JSON（不要 markdown 代码块，不要任何解释）：
 {{
-  "trend_style": "当下最流行的视觉风格关键词（20字内）",
-  "scenario": "主流消费场景（15字内）",
-  "selling_points": ["卖点1", "卖点2", "卖点3"],
-  "avoid": ["避免1", "避免2"],
-  "prompt_enhancement": "一段 60-100 字的 prompt 增强描述",
-  "season_tag": "{season_hint}"
+  "user_profile": "一句话用户画像（30字内）",
+  "purchase_scenario": "主要购买场景（15字内）",
+  "season_tag": "{season_hint}",
+  "festival_tag": "{festival_hint}",
+  "trend_style": "当下最流行的视觉风格（20字内）",
+  "color_scheme": "推荐配色（20字内）",
+  "composition": "推荐构图（20字内）",
+  "lighting": "推荐光影（15字内）",
+  "selling_points": ["核心卖点1", "核心卖点2", "核心卖点3"],
+  "conversion_tips": ["转化建议1", "转化建议2", "转化建议3"],
+  "avoid": ["过时元素1", "过时元素2"],
+  "prompt_enhancement": "100-150字的完整生成 prompt（中英混排）",
+  "ai_comment": "一句给用户的核心建议（40字内）"
 }}
 """
     try:
         response = client.chat.completions.create(
             model="deepseek-flash",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
+            temperature=0.4
         )
         raw = response.choices[0].message.content.strip()
         if raw.startswith("```"):
@@ -795,19 +815,26 @@ async def market_analysis(req: MarketAnalysisRequest):
                 raw = raw.strip()
 
         result = json.loads(raw)
-        add_log("market_analysis", {"theme": req.theme, "kind": req.kind}, "分析成功", True)
+        add_log("market_analysis", {"theme": req.theme, "kind": req.kind}, "深度分析成功", True)
         return {"success": True, "analysis": result}
     except Exception as e:
         print(f"[market_analysis] 失败: {e}")
         return {
             "success": True,
             "analysis": {
+                "user_profile": "25-45岁品质生活人群",
+                "purchase_scenario": "自用/送礼",
+                "season_tag": season_hint,
+                "festival_tag": festival_hint,
                 "trend_style": "现代简约，暖色调",
-                "scenario": "自用/送礼",
-                "selling_points": ["品质", "设计", "性价比"],
-                "avoid": ["过时的浓重滤镜"],
-                "prompt_enhancement": "modern minimalist style, warm tone, high-end commercial photography",
-                "season_tag": season_hint
+                "color_scheme": "奶油白 + 焦糖棕",
+                "composition": "中心对称，留白30%",
+                "lighting": "柔光箱打光，暖色温",
+                "selling_points": ["品质感", "设计感", "性价比"],
+                "conversion_tips": ["第一眼突出商品", "叠加使用场景", "弱化复杂背景"],
+                "avoid": ["过时的浓重滤镜", "杂乱背景"],
+                "prompt_enhancement": "modern minimalist style, warm beige tone, high-end commercial photography, soft studio lighting, clean background, focus on product texture, ecommerce main image, high detail, professional",
+                "ai_comment": "建议突出品质感与使用场景，避免过度装饰"
             }
         }
 
@@ -1586,7 +1613,7 @@ async def cleanup_temp_manual():
 
 
 # ============================================================
-# 视频抽帧（服务端，OpenCV 可选）
+# 视频抽帧
 # ============================================================
 class ExtractFramesRequest(BaseModel):
     video_url: Optional[str] = None
@@ -1801,7 +1828,7 @@ async def export_csv():
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "AI 助手后端服务运行中（含 AI 意图识别 + 智能商品匹配 + 市场分析 + 临时图床 + 视频反解 + 素材持久化）"}
+    return {"status": "ok", "message": "AI 助手后端服务运行中（含 AI 意图识别 + 智能商品匹配 + AI电商策略分析 + 临时图床 + 视频反解 + 素材持久化）"}
 
 
 if __name__ == "__main__":
