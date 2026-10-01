@@ -12,6 +12,7 @@ import base64
 import uuid
 import time
 import asyncio
+import httpx
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ from contextlib import asynccontextmanager
 
 load_dotenv()
 
-# ★ 修复：强制 stdout/stderr 使用 UTF-8（Railway 环境防中文乱码）
+# 强制 stdout/stderr 使用 UTF-8（防中文乱码）
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
@@ -44,20 +45,12 @@ TEMP_META_FILE = TEMP_UPLOAD_DIR / "_meta.json"
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads")).resolve()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-for _sub in ("main", "sub", "video", "detail"):
+for _sub in ("main", "sub", "video", "detail", "proxy"):
     (UPLOAD_DIR / _sub).mkdir(parents=True, exist_ok=True)
 
 
-# ★★★ 关键修复：公共 URL 获取（解决 Railway 反向代理 http→https 问题）
+# ★ 关键：公共 URL 获取（处理 Railway 反向代理 http→https）
 def get_public_base_url(request: Request) -> str:
-    """
-    获取公共可访问的 HTTPS 基础 URL。
-
-    优先级：
-    1. 环境变量 PUBLIC_BASE_URL（最可靠，Railway 必设）
-    2. X-Forwarded-Proto / X-Forwarded-Host 请求头
-    3. request.base_url（兜底，强制 http→https）
-    """
     env_url = os.getenv("PUBLIC_BASE_URL", "").strip()
     if env_url:
         return env_url.rstrip("/")
@@ -399,6 +392,8 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "parse_generation": "AI 意图识别",
         "match_products": "商品智能匹配",
         "market_analysis": "AI电商策略分析",
+        "proxy_image": "代理下载图片",
+        "proxy_video": "代理下载视频",
     }
     logs = load_logs()
     log_entry = {
@@ -452,6 +447,107 @@ def _delete_file_by_url(url: str):
         file_path.unlink(missing_ok=True)
     except Exception as e:
         print(f"[_delete_file_by_url] 删除失败 {url}: {e}")
+
+
+# ============================================================
+# ★ 新增：图片/视频代理（解决手机访问不了 Agnes CDN 的问题）
+# ============================================================
+class ProxyMediaRequest(BaseModel):
+    media_url: str
+
+
+@app.post("/api/proxy/image")
+async def proxy_image(req: ProxyMediaRequest, request: Request):
+    """后端代理下载图片，返回自己域名下的 URL"""
+    if not req.media_url:
+        return {"success": False, "message": "缺少 media_url"}
+
+    if not req.media_url.startswith(("http://", "https://")):
+        return {"success": False, "message": "URL 格式错误"}
+
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
+            r = await http.get(req.media_url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"
+            })
+            if r.status_code != 200:
+                return {"success": False, "message": f"下载失败：HTTP {r.status_code}"}
+            content = r.content
+            content_type = r.headers.get("content-type", "image/png").lower()
+    except Exception as e:
+        return {"success": False, "message": f"下载异常：{str(e)}"}
+
+    if len(content) > 20 * 1024 * 1024:
+        return {"success": False, "message": "图片超过 20MB"}
+
+    if "png" in content_type:
+        ext = ".png"
+    elif "webp" in content_type:
+        ext = ".webp"
+    elif "gif" in content_type:
+        ext = ".gif"
+    elif "jpeg" in content_type or "jpg" in content_type:
+        ext = ".jpg"
+    else:
+        ext = ".jpg"
+
+    proxy_dir = UPLOAD_DIR / "proxy"
+    proxy_dir.mkdir(parents=True, exist_ok=True)
+    file_id = uuid.uuid4().hex[:16]
+    file_path = proxy_dir / f"{file_id}{ext}"
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    base_url = get_public_base_url(request)
+    public_url = f"{base_url}/uploads/proxy/{file_id}{ext}"
+
+    add_log("proxy_image", {"source": req.media_url[:80]}, f"已代理到 {public_url}", True)
+    return {"success": True, "url": public_url, "size": len(content)}
+
+
+@app.post("/api/proxy/video")
+async def proxy_video(req: ProxyMediaRequest, request: Request):
+    """后端代理下载视频，返回自己域名下的 URL"""
+    if not req.media_url:
+        return {"success": False, "message": "缺少 media_url"}
+
+    if not req.media_url.startswith(("http://", "https://")):
+        return {"success": False, "message": "URL 格式错误"}
+
+    try:
+        async with httpx.AsyncClient(timeout=180, follow_redirects=True) as http:
+            r = await http.get(req.media_url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"
+            })
+            if r.status_code != 200:
+                return {"success": False, "message": f"下载失败：HTTP {r.status_code}"}
+            content = r.content
+            content_type = r.headers.get("content-type", "video/mp4").lower()
+    except Exception as e:
+        return {"success": False, "message": f"下载异常：{str(e)}"}
+
+    if len(content) > 100 * 1024 * 1024:
+        return {"success": False, "message": "视频超过 100MB"}
+
+    if "webm" in content_type:
+        ext = ".webm"
+    elif "quicktime" in content_type or "mov" in content_type:
+        ext = ".mov"
+    else:
+        ext = ".mp4"
+
+    proxy_dir = UPLOAD_DIR / "proxy"
+    proxy_dir.mkdir(parents=True, exist_ok=True)
+    file_id = uuid.uuid4().hex[:16]
+    file_path = proxy_dir / f"{file_id}{ext}"
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    base_url = get_public_base_url(request)
+    public_url = f"{base_url}/uploads/proxy/{file_id}{ext}"
+
+    add_log("proxy_video", {"source": req.media_url[:80]}, f"已代理到 {public_url}", True)
+    return {"success": True, "url": public_url, "size": len(content)}
 
 
 # ============================================================
@@ -593,7 +689,7 @@ async def parse_generation(req: dict):
 
 
 # ============================================================
-# 商品智能匹配（三级匹配）
+# 商品智能匹配
 # ============================================================
 class MatchRequest(BaseModel):
     keywords: List[str]
@@ -608,7 +704,6 @@ async def match_products(req: MatchRequest):
     matches = []
     seen = set()
 
-    # L1 精确匹配
     for kw in req.keywords:
         clean = kw.replace(" ", "").strip().lower()
         for p in products:
@@ -628,7 +723,6 @@ async def match_products(req: MatchRequest):
         add_log("match_products", {"keywords": req.keywords}, f"L1 精确匹配 {len(matches)} 个", True)
         return {"success": True, "matches": matches}
 
-    # L2 语义匹配（AI）
     products_summary = [
         {
             "name": p["name"],
@@ -652,9 +746,9 @@ async def match_products(req: MatchRequest):
 
 请判断用户输入最可能对应哪个（或哪些）商品。考虑：
 1. 商品名称的语义相关性
-2. 商品的分类（如"茶叶"类商品与用户说的"茶叶"相关）
-3. 商品的子分类（如"龙井"与子类"龙井"相关）
-4. 商品的标签（如标签"送礼"与用户说的"送礼"相关）
+2. 商品的分类
+3. 商品的子分类
+4. 商品的标签
 5. 商品的规格、用途
 
 严格返回 JSON（不要 markdown 代码块，不要任何解释）：
@@ -706,7 +800,6 @@ async def match_products(req: MatchRequest):
     except Exception as e:
         print(f"[match_products] AI 语义匹配失败: {e}")
 
-    # L3 分类/标签兜底
     if not matches:
         for kw in req.keywords:
             clean = kw.replace(" ", "").lower()
@@ -742,7 +835,7 @@ async def match_products(req: MatchRequest):
 
 
 # ============================================================
-# AI 电商市场顾问（深度分析）
+# AI 电商市场顾问
 # ============================================================
 class MarketAnalysisRequest(BaseModel):
     theme: str
@@ -782,26 +875,10 @@ async def market_analysis(req: MarketAnalysisRequest):
 请从**电商转化**角度深度分析，给出：
 
 【1. 目标用户画像】
-- 谁最可能买「{req.theme}」这类商品？（年龄/性别/消费场景/购买动机）
-- 他们在什么场景下会下单？（自用/送礼/囤货/尝鲜）
-
 【2. 当下市场趋势】
-- 这个主题在 {season_hint} 最流行的视觉风格是什么？
-- 近期电商平台哪些元素/配色/构图最火？
-- 哪些风格已经过时、要避免？
-
 【3. 电商转化建议】
-- 主图第一眼要突出什么？（用户0.5秒决策）
-- 视频前3秒要抓什么？（跳出率最高）
-- 应该叠加什么利益点？（价格/品质/服务/情感）
-
 【4. 推荐视觉方案】
-- 具体配色（如"莫兰迪色系+焦糖色点缀"）
-- 具体构图（如"中心对称+留白30%"）
-- 具体光影（如"柔光箱打光+暖色调"）
-
 【5. 可直接使用的生成 Prompt】
-把以上内容整合成一段 100-150 字的 prompt（中英混排），可直接用于 AI 图片/视频生成。
 
 严格返回以下 JSON（不要 markdown 代码块，不要任何解释）：
 {{
@@ -1265,7 +1342,6 @@ async def upload_image(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # ★ 修复：使用 get_public_base_url
     base_url = get_public_base_url(request)
     if image_type == "sub":
         safe_name = "".join(c for c in product_name if c.isalnum() or c in "-_") or "unknown"
@@ -1589,7 +1665,6 @@ async def upload_temp_file(
     }
     _save_temp_meta(temp_meta)
 
-    # ★ 修复：使用 get_public_base_url
     base_url = get_public_base_url(request)
     public_url = f"{base_url}/temp/{file_id}"
 
@@ -1654,7 +1729,6 @@ async def extract_frames(
     if file is not None:
         video_bytes = await file.read()
     elif video_url:
-        import httpx
         try:
             async with httpx.AsyncClient(timeout=30) as http:
                 r = await http.get(video_url)
@@ -1710,7 +1784,6 @@ async def extract_frames(
     if not frames_data:
         return {"success": False, "message": "抽帧失败，未获取到有效帧"}
 
-    # ★ 修复：使用 get_public_base_url
     base_url = get_public_base_url(request)
     frame_urls = []
     for idx, data in enumerate(frames_data):
@@ -1761,9 +1834,9 @@ async def decompose_video(req: DecomposeRequest):
     system_prompt = """你是专业的电商短视频分析师。
 用户会提供几帧参考视频的画面，请你反解出：
 1. **画面内容**：商品是什么、场景、构图、色调、光影
-2. **运镜方式**：镜头运动（推/拉/摇/移/跟/升降/环绕）、景别（特写/中景/全景）
+2. **运镜方式**：镜头运动、景别
 3. **节奏与转场**：快慢、是否有慢动作、转场方式
-4. **生成 prompt**：把以上内容整合成一段 80-150 字的中文 prompt，可直接用于 AI 视频生成
+4. **生成 prompt**：把以上内容整合成一段 80-150 字的中文 prompt
 
 严格输出以下 JSON 格式（不要 markdown 代码块）：
 {
@@ -1855,7 +1928,7 @@ async def root():
     base_url_info = os.getenv("PUBLIC_BASE_URL", "(未设置，使用 request.base_url)")
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含 AI 意图识别 + 智能商品匹配 + AI电商策略分析 + 临时图床 + 视频反解 + 素材持久化）",
+        "message": "AI 助手后端服务运行中（含代理图片/视频 + AI意图识别 + 智能商品匹配 + AI电商策略分析 + 临时图床 + 视频反解 + 素材持久化）",
         "public_base_url": base_url_info
     }
 
