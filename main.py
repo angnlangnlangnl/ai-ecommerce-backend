@@ -5,6 +5,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from openai import OpenAI
 import os
+import sys
+import io
 import json
 import base64
 import uuid
@@ -17,6 +19,12 @@ from typing import Optional, List
 from contextlib import asynccontextmanager
 
 load_dotenv()
+
+# ★ 修复：强制 stdout/stderr 使用 UTF-8（Railway 环境防中文乱码）
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # ============================================================
 # 临时图床配置
@@ -38,6 +46,32 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 for _sub in ("main", "sub", "video", "detail"):
     (UPLOAD_DIR / _sub).mkdir(parents=True, exist_ok=True)
+
+
+# ★★★ 关键修复：公共 URL 获取（解决 Railway 反向代理 http→https 问题）
+def get_public_base_url(request: Request) -> str:
+    """
+    获取公共可访问的 HTTPS 基础 URL。
+
+    优先级：
+    1. 环境变量 PUBLIC_BASE_URL（最可靠，Railway 必设）
+    2. X-Forwarded-Proto / X-Forwarded-Host 请求头
+    3. request.base_url（兜底，强制 http→https）
+    """
+    env_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    forwarded_host = request.headers.get("x-forwarded-host", "")
+    if forwarded_host:
+        proto = forwarded_proto or "https"
+        return f"{proto}://{forwarded_host}".rstrip("/")
+
+    base = str(request.base_url).rstrip("/")
+    if base.startswith("http://") and "localhost" not in base and "127.0.0.1" not in base:
+        base = "https://" + base[len("http://"):]
+    return base
 
 
 def _load_temp_meta():
@@ -528,12 +562,6 @@ async def parse_generation(req: dict):
 4. 若用户上传了参考素材 → 优先推荐生成同类素材
 5. 若文本含"海报" → kind=poster；含"视频" → kind=video；含"图/主图" → kind=images
 6. 若文本既无"生成"意图也无"操作"意图 → kind=null
-
-示例：
-- "图片+文字参考图生成视频" → {{"kind": "video", "is_bound": false, "product_name": "", "seconds": "5", "free_theme": "", "ai_suggestion": "基于参考图生成视频"}}
-- "生成一张茶叶促销海报" → {{"kind": "poster", "is_bound": false, "product_name": "", "poster_type": "促销海报", "free_theme": "茶叶"}}
-- "生成3张主图" → {{"kind": "images", "is_bound": false, "product_name": "", "count": 3}}
-- "给云山茶叶礼盒生成3张主图" → {{"kind": "images", "is_bound": true, "product_name": "云山茶叶礼盒", "count": 3}}
 """
 
     try:
@@ -714,7 +742,7 @@ async def match_products(req: MatchRequest):
 
 
 # ============================================================
-# ★ AI 电商市场顾问（深度分析）
+# AI 电商市场顾问（深度分析）
 # ============================================================
 class MarketAnalysisRequest(BaseModel):
     theme: str
@@ -724,13 +752,6 @@ class MarketAnalysisRequest(BaseModel):
 
 @app.post("/api/ai/market-analysis")
 async def market_analysis(req: MarketAnalysisRequest):
-    """
-    AI 扮演电商市场顾问：
-    1. 分析目标用户需求（谁在买、为什么买、什么时候买）
-    2. 分析市场趋势（当下什么风格火、什么元素过时）
-    3. 给出电商转化建议（怎么拍更能卖货）
-    4. 输出可直接使用的生成 prompt
-    """
     if not req.theme:
         return {"success": False, "message": "缺少主题"}
 
@@ -1244,7 +1265,8 @@ async def upload_image(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    base_url = str(request.base_url).rstrip("/")
+    # ★ 修复：使用 get_public_base_url
+    base_url = get_public_base_url(request)
     if image_type == "sub":
         safe_name = "".join(c for c in product_name if c.isalnum() or c in "-_") or "unknown"
         public_url = f"{base_url}/uploads/sub/{safe_name}/{stored_name}"
@@ -1567,7 +1589,8 @@ async def upload_temp_file(
     }
     _save_temp_meta(temp_meta)
 
-    base_url = str(request.base_url).rstrip("/")
+    # ★ 修复：使用 get_public_base_url
+    base_url = get_public_base_url(request)
     public_url = f"{base_url}/temp/{file_id}"
 
     add_log("upload_temp", {"file_id": file_id, "purpose": purpose}, f"已上传临时文件 {file_id}", True)
@@ -1687,7 +1710,8 @@ async def extract_frames(
     if not frames_data:
         return {"success": False, "message": "抽帧失败，未获取到有效帧"}
 
-    base_url = str(request.base_url).rstrip("/")
+    # ★ 修复：使用 get_public_base_url
+    base_url = get_public_base_url(request)
     frame_urls = []
     for idx, data in enumerate(frames_data):
         file_id = uuid.uuid4().hex[:16]
@@ -1828,7 +1852,12 @@ async def export_csv():
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "AI 助手后端服务运行中（含 AI 意图识别 + 智能商品匹配 + AI电商策略分析 + 临时图床 + 视频反解 + 素材持久化）"}
+    base_url_info = os.getenv("PUBLIC_BASE_URL", "(未设置，使用 request.base_url)")
+    return {
+        "status": "ok",
+        "message": "AI 助手后端服务运行中（含 AI 意图识别 + 智能商品匹配 + AI电商策略分析 + 临时图床 + 视频反解 + 素材持久化）",
+        "public_base_url": base_url_info
+    }
 
 
 if __name__ == "__main__":
