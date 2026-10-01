@@ -1,5 +1,9 @@
 fastapi
-uvicorn
+uvicorn[standard]
 openai
 python-dotenv
 python-multipart
+httpx
+opencv-python-headless
+numpy
+pydantic
