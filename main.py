@@ -394,6 +394,8 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "market_analysis": "AI电商策略分析",
         "proxy_image": "代理下载图片",
         "proxy_video": "代理下载视频",
+        "agnes_generate_image": "后端代调Agnes图片",
+        "agnes_generate_video": "后端代调Agnes视频",
     }
     logs = load_logs()
     log_entry = {
@@ -450,7 +452,184 @@ def _delete_file_by_url(url: str):
 
 
 # ============================================================
-# ★ 新增：图片/视频代理（解决手机访问不了 Agnes CDN 的问题）
+# ★★★ 新增：后端代调 Agnes（解决手机端所有网络/CORS问题）
+# ============================================================
+class AgnesImageRequest(BaseModel):
+    prompt: str
+    size: str = "1K"
+    ratio: str = "1:1"
+    reference_images: Optional[List[str]] = None
+
+
+class AgnesVideoRequest(BaseModel):
+    prompt: str
+    seconds: str = "5"
+    aspect_ratio: str = "9:16"
+    reference_images: Optional[List[str]] = None
+
+
+@app.post("/api/agnes/generate-image")
+async def agnes_generate_image(req: AgnesImageRequest, request: Request):
+    """后端代调 Agnes 图片生成，返回自己域名下的 URL"""
+    api_key = os.getenv("AGNES_API_KEY", "sk-XmLjN9e3Mhh8wf")
+
+    body = {
+        "model": "agnes-image-2.5-flash",
+        "prompt": req.prompt,
+        "size": req.size,
+        "ratio": req.ratio,
+        "extra_body": {"response_format": "url"}
+    }
+    if req.reference_images and len(req.reference_images) > 0:
+        body["extra_body"]["image"] = req.reference_images[:5]
+        if "参考" not in req.prompt and "reference" not in req.prompt.lower():
+            body["prompt"] = req.prompt + "（参考上传的图片风格与主体）"
+
+    try:
+        async with httpx.AsyncClient(timeout=180) as http:
+            r = await http.post(
+                "https://apihub.agnes-ai.com/v1/images/generations",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=body
+            )
+            if r.status_code != 200:
+                err_text = r.text[:500]
+                print(f"[agnes-image] HTTP {r.status_code}: {err_text}")
+                return {"success": False, "message": f"Agnes 返回 {r.status_code}: {err_text}"}
+            data = r.json()
+    except Exception as e:
+        print(f"[agnes-image] 异常: {e}")
+        return {"success": False, "message": f"调用 Agnes 异常：{str(e)}"}
+
+    agnes_url = None
+    b64_data = None
+    if data.get("data") and data["data"][0]:
+        agnes_url = data["data"][0].get("url")
+        b64_data = data["data"][0].get("b64_json")
+
+    content = None
+    ext = ".png"
+    if agnes_url:
+        try:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
+                img_r = await http.get(agnes_url, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"
+                })
+                if img_r.status_code == 200:
+                    content = img_r.content
+                else:
+                    return {"success": False, "message": f"下载 Agnes 图片失败：{img_r.status_code}"}
+        except Exception as e:
+            return {"success": False, "message": f"下载 Agnes 图片异常：{str(e)}"}
+    elif b64_data:
+        try:
+            content = base64.b64decode(b64_data)
+        except Exception as e:
+            return {"success": False, "message": f"解码 base64 失败：{str(e)}"}
+    else:
+        return {"success": False, "message": "Agnes 未返回图片", "raw": str(data)[:500]}
+
+    proxy_dir = UPLOAD_DIR / "proxy"
+    proxy_dir.mkdir(parents=True, exist_ok=True)
+    file_id = uuid.uuid4().hex[:16]
+    file_path = proxy_dir / f"{file_id}{ext}"
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    base_url = get_public_base_url(request)
+    public_url = f"{base_url}/uploads/proxy/{file_id}{ext}"
+
+    add_log("agnes_generate_image", {"prompt": req.prompt[:50]}, f"已生成 {public_url}", True)
+    return {"success": True, "url": public_url}
+
+
+@app.post("/api/agnes/generate-video")
+async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
+    """后端代调 Agnes 视频生成（含轮询和代理下载）"""
+    api_key = os.getenv("AGNES_API_KEY", "sk-XmLjN9e3Mhh8wf")
+
+    body = {
+        "model": "agnes-video-2.5-flash",
+        "prompt": req.prompt,
+        "seconds": req.seconds,
+        "mode": "reference" if req.reference_images else "text",
+        "size": "720P",
+        "aspect_ratio": req.aspect_ratio,
+        "n": 1
+    }
+    if req.reference_images:
+        body["images"] = req.reference_images[:5]
+        if "参考" not in req.prompt and "picture" not in req.prompt.lower():
+            body["prompt"] = req.prompt + "。以 <Picture 1> 中的商品外观、色调和风格为参考，保持主体一致性。"
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as http:
+            r = await http.post(
+                "https://apihub.agnes-ai.com/v1/videos",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=body
+            )
+            if r.status_code != 200:
+                return {"success": False, "message": f"创建视频任务失败：{r.text[:300]}"}
+            create_data = r.json()
+    except Exception as e:
+        return {"success": False, "message": f"创建视频任务异常：{str(e)}"}
+
+    video_id = create_data.get("video_id")
+    if not video_id:
+        return {"success": False, "message": "未返回 video_id"}
+
+    last_status = ""
+    for i in range(300):
+        await asyncio.sleep(2)
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                qr = await http.get(
+                    f"https://apihub.agnes-ai.com/agnesapi?video_id={video_id}&model_name=agnes-video-2.5-flash",
+                    headers={"Authorization": f"Bearer {api_key}"}
+                )
+                if qr.status_code != 200:
+                    continue
+                qd = qr.json()
+        except Exception:
+            continue
+
+        status = qd.get("status")
+        last_status = status or last_status
+        if status == "completed":
+            video_url = qd.get("url")
+            if not video_url:
+                return {"success": False, "message": "视频完成但无 URL"}
+            try:
+                async with httpx.AsyncClient(timeout=180, follow_redirects=True) as http:
+                    v_r = await http.get(video_url)
+                    if v_r.status_code != 200:
+                        return {"success": False, "message": f"下载视频失败：{v_r.status_code}"}
+                    content = v_r.content
+            except Exception as e:
+                return {"success": False, "message": f"下载视频异常：{str(e)}"}
+
+            proxy_dir = UPLOAD_DIR / "proxy"
+            proxy_dir.mkdir(parents=True, exist_ok=True)
+            file_id = uuid.uuid4().hex[:16]
+            file_path = proxy_dir / f"{file_id}.mp4"
+            with open(file_path, "wb") as f:
+                f.write(content)
+
+            base_url = get_public_base_url(request)
+            public_url = f"{base_url}/uploads/proxy/{file_id}.mp4"
+            add_log("agnes_generate_video", {"prompt": req.prompt[:50]}, f"已生成 {public_url}", True)
+            return {"success": True, "url": public_url}
+
+        if status == "failed":
+            err = qd.get("error") or "未知错误"
+            return {"success": False, "message": f"视频生成失败：{err}"}
+
+    return {"success": False, "message": f"视频生成超时（最后状态：{last_status}）"}
+
+
+# ============================================================
+# 图片/视频代理（兼容旧接口）
 # ============================================================
 class ProxyMediaRequest(BaseModel):
     media_url: str
@@ -458,10 +637,8 @@ class ProxyMediaRequest(BaseModel):
 
 @app.post("/api/proxy/image")
 async def proxy_image(req: ProxyMediaRequest, request: Request):
-    """后端代理下载图片，返回自己域名下的 URL"""
     if not req.media_url:
         return {"success": False, "message": "缺少 media_url"}
-
     if not req.media_url.startswith(("http://", "https://")):
         return {"success": False, "message": "URL 格式错误"}
 
@@ -486,8 +663,6 @@ async def proxy_image(req: ProxyMediaRequest, request: Request):
         ext = ".webp"
     elif "gif" in content_type:
         ext = ".gif"
-    elif "jpeg" in content_type or "jpg" in content_type:
-        ext = ".jpg"
     else:
         ext = ".jpg"
 
@@ -500,17 +675,14 @@ async def proxy_image(req: ProxyMediaRequest, request: Request):
 
     base_url = get_public_base_url(request)
     public_url = f"{base_url}/uploads/proxy/{file_id}{ext}"
-
     add_log("proxy_image", {"source": req.media_url[:80]}, f"已代理到 {public_url}", True)
     return {"success": True, "url": public_url, "size": len(content)}
 
 
 @app.post("/api/proxy/video")
 async def proxy_video(req: ProxyMediaRequest, request: Request):
-    """后端代理下载视频，返回自己域名下的 URL"""
     if not req.media_url:
         return {"success": False, "message": "缺少 media_url"}
-
     if not req.media_url.startswith(("http://", "https://")):
         return {"success": False, "message": "URL 格式错误"}
 
@@ -545,7 +717,6 @@ async def proxy_video(req: ProxyMediaRequest, request: Request):
 
     base_url = get_public_base_url(request)
     public_url = f"{base_url}/uploads/proxy/{file_id}{ext}"
-
     add_log("proxy_video", {"source": req.media_url[:80]}, f"已代理到 {public_url}", True)
     return {"success": True, "url": public_url, "size": len(content)}
 
@@ -1928,7 +2099,7 @@ async def root():
     base_url_info = os.getenv("PUBLIC_BASE_URL", "(未设置，使用 request.base_url)")
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含代理图片/视频 + AI意图识别 + 智能商品匹配 + AI电商策略分析 + 临时图床 + 视频反解 + 素材持久化）",
+        "message": "AI 助手后端服务运行中（含 Agnes 后端代理 + AI意图识别 + 智能商品匹配 + AI电商策略分析 + 临时图床 + 视频反解 + 素材持久化）",
         "public_base_url": base_url_info
     }
 
