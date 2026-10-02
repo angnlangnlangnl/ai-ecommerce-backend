@@ -132,13 +132,14 @@ app.add_middleware(
 
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
+# ★★★ 关键修复：api_key 用占位符兜底，防止环境变量为空时服务崩溃
 client = OpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    api_key=os.getenv("DEEPSEEK_API_KEY", "").strip() or "placeholder-no-key",
     base_url="https://api.deepseek.com"
 )
 
 agnes_client = OpenAI(
-    api_key=os.getenv("AGNES_API_KEY", ""),
+    api_key=os.getenv("AGNES_API_KEY", "").strip() or "placeholder-no-key",
     base_url="https://apihub.agnes-ai.com/v1"
 )
 
@@ -149,7 +150,7 @@ LOG_MAX = 1000
 
 
 # ============================================================
-# ★★★ 新增：调试接口（判断环境变量和 Key 是否生效）
+# ★★★ 调试接口（判断环境变量和 Key 是否生效）
 # ============================================================
 @app.get("/api/debug/env")
 async def debug_env():
@@ -172,7 +173,7 @@ async def debug_env():
         "DEEPSEEK_API_KEY": mask(deepseek_key),
         "DEEPSEEK_API_KEY_length": len(deepseek_key),
         "PUBLIC_BASE_URL": public_url or "(未设置)",
-        "note": "如果 AGNES_API_KEY_length 是 17，说明读到的是旧截断值；正确值应该是 43 位左右"
+        "note": "如果 AGNES_API_KEY_length 是 0，说明环境变量没生效；正确值应该是 43 位左右"
     }
 
 
