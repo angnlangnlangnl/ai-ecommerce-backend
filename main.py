@@ -49,7 +49,6 @@ for _sub in ("main", "sub", "video", "detail", "proxy"):
     (UPLOAD_DIR / _sub).mkdir(parents=True, exist_ok=True)
 
 
-# ★ 关键：公共 URL 获取（处理 Railway 反向代理 http→https）
 def get_public_base_url(request: Request) -> str:
     env_url = os.getenv("PUBLIC_BASE_URL", "").strip()
     if env_url:
@@ -132,7 +131,6 @@ app.add_middleware(
 
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
-# ★★★ 关键修复：api_key 用占位符兜底，防止环境变量为空时服务崩溃
 client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY", "").strip() or "placeholder-no-key",
     base_url="https://api.deepseek.com"
@@ -150,7 +148,7 @@ LOG_MAX = 1000
 
 
 # ============================================================
-# ★★★ 调试接口（判断环境变量和 Key 是否生效）
+# 调试接口
 # ============================================================
 @app.get("/api/debug/env")
 async def debug_env():
@@ -450,6 +448,7 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "decompose_video": "视频反解",
         "parse_generation": "AI 意图识别",
         "match_products": "商品智能匹配",
+        "smart_match": "智能匹配商品",
         "market_analysis": "AI电商策略分析",
         "proxy_image": "代理下载图片",
         "proxy_video": "代理下载视频",
@@ -511,7 +510,160 @@ def _delete_file_by_url(url: str):
 
 
 # ============================================================
-# ★★★ 后端代调 Agnes
+# ★★★ 智能匹配商品（5 级匹配）
+# ============================================================
+class SmartMatchRequest(BaseModel):
+    keyword: str
+    max_results: int = 5
+
+
+@app.post("/api/products/smart-match")
+async def smart_match_products(req: SmartMatchRequest):
+    """
+    智能匹配商品（5 级匹配）
+    L1 商品名包含关键词          → 100%
+    L2 分类匹配                  → 80%
+    L2.5 字符包含（茶叶→茶）    → 70%
+    L3 子分类/subcat 匹配        → 65%
+    L4 tags 标签匹配             → 60%
+    L5 部分模糊匹配              → 50%
+    """
+    keyword = req.keyword.strip()
+    if not keyword:
+        return {"success": False, "message": "缺少关键词", "has_match": False, "matched": []}
+
+    # 提取关键词的核心字符（用于 L2.5 模糊匹配）
+    # 例如"龙井茶" → 提取单字"茶"、"龙"、"井" 作为候选
+    def extract_core_chars(kw):
+        """从关键词提取有意义的核心字符（中文字符，去停用词）"""
+        stopwords = {'的', '了', '是', '在', '和', '与', '或', '及', '等', '个', '款', '种'}
+        chars = set()
+        for ch in kw:
+            if '\u4e00' <= ch <= '\u9fff' and ch not in stopwords:
+                chars.add(ch)
+        return chars
+
+    core_chars = extract_core_chars(keyword)
+    matched_names = set()
+    matches = []
+
+    def add_match(p, score, reason, level):
+        if p["name"] in matched_names:
+            return
+        matched_names.add(p["name"])
+        matches.append({
+            "product_name": p["name"],
+            "score": score,
+            "reason": reason,
+            "level": level,
+            "price": p.get("price", 0),
+            "stock": p.get("stock", 0),
+            "category": p.get("category", "")
+        })
+
+    # L1: 商品名包含关键词 → 100%
+    for p in products:
+        if keyword in p["name"]:
+            add_match(p, 100, f"商品名包含「{keyword}」", "L1")
+
+    # L2: 分类匹配 → 80%
+    for p in products:
+        if keyword == p.get("category", "") or keyword in p.get("category", ""):
+            add_match(p, 80, f"分类为「{p.get('category', '')}」", "L2")
+
+    # L2.5: 字符包含（核心字）→ 70%
+    # 例如关键词"龙井茶" 匹配商品名"云山茶叶礼盒"（因为都含"茶"字）
+    if len(matches) < req.max_results * 2:
+        for p in products:
+            if p["name"] in matched_names:
+                continue
+            # 商品名包含关键词的任一个核心字符
+            name_chars = set(p["name"])
+            common = core_chars & name_chars
+            if common and len(common) >= 1:
+                # 匹配字符越多分数越高
+                score = 70 if len(common) >= 2 else 65
+                add_match(p, score, f"包含核心字「{''.join(common)}」", "L2.5")
+
+    # L3: subcat 匹配 → 65%
+    for p in products:
+        subcat = p.get("subcat", "")
+        if subcat and (keyword in subcat or subcat in keyword):
+            add_match(p, 65, f"子分类为「{subcat}」", "L3")
+
+    # L4: tags 匹配 → 60%
+    for p in products:
+        tags = p.get("tags", [])
+        if any(keyword in t or t in keyword for t in tags):
+            hit_tags = [t for t in tags if keyword in t or t in keyword]
+            add_match(p, 60, f"标签含「{'/'.join(hit_tags)}」", "L4")
+
+    # L5: 部分模糊匹配（关键词的任一字出现在商品名）→ 50%
+    if len(matches) < req.max_results:
+        for p in products:
+            if p["name"] in matched_names:
+                continue
+            name = p["name"]
+            # 关键词的任一字符出现在商品名
+            if any(ch in name for ch in keyword):
+                add_match(p, 50, f"名称部分匹配", "L5")
+
+    # 排序、去重、截断
+    matches.sort(key=lambda x: (-x["score"], x["product_name"]))
+    matches = matches[:req.max_results]
+
+    has_match = len(matches) > 0
+    add_log("smart_match", {"keyword": keyword},
+            f"匹配 {len(matches)} 个（共 {len(products)} 商品）", True)
+
+    return {
+        "success": True,
+        "has_match": has_match,
+        "keyword": keyword,
+        "matched": matches,
+        "total_products": len(products),
+        "suggest_create": not has_match
+    }
+
+
+# ============================================================
+# AI 推荐新商品分类
+# ============================================================
+class SuggestCategoryRequest(BaseModel):
+    keyword: str
+
+
+@app.post("/api/products/suggest-category")
+async def suggest_category(req: SuggestCategoryRequest):
+    """根据商品名智能推荐分类（用简单规则，不调 AI，速度快）"""
+    keyword = req.keyword.strip()
+
+    CATEGORY_KEYWORDS = {
+        "茶叶": ["茶", "龙井", "碧螺春", "铁观音", "大红袍", "毛尖", "普洱", "红茶", "绿茶", "乌龙"],
+        "食品": ["糕", "饼", "糖", "果", "肉", "零食", "坚果", "核桃", "开心果", "巴旦木", "干", "蜜饯", "果脯"],
+        "手工艺": ["杯", "瓷", "陶", "竹", "编", "木", "手工", "织", "绣", "雕刻", "壶", "碗"],
+        "文创": ["丝巾", "折扇", "书签", "明信片", "文创", "国风", "香薰", "手工皂", "笔", "本", "画"],
+    }
+
+    suggested = "文创"  # 默认
+    for cat, keywords in CATEGORY_KEYWORDS.items():
+        for kw in keywords:
+            if kw in keyword:
+                suggested = cat
+                break
+        else:
+            continue
+        break
+
+    return {
+        "success": True,
+        "suggested_category": suggested,
+        "all_categories": ["茶叶", "食品", "手工艺", "文创"]
+    }
+
+
+# ============================================================
+# 后端代调 Agnes
 # ============================================================
 class AgnesImageRequest(BaseModel):
     prompt: str
@@ -529,7 +681,6 @@ class AgnesVideoRequest(BaseModel):
 
 @app.post("/api/agnes/generate-image")
 async def agnes_generate_image(req: AgnesImageRequest, request: Request):
-    """后端代调 Agnes 图片生成，返回自己域名下的 URL"""
     api_key = os.getenv("AGNES_API_KEY", "").strip()
     if not api_key:
         return {"success": False, "message": "AGNES_API_KEY 环境变量未设置"}
@@ -604,15 +755,8 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
     return {"success": True, "url": public_url}
 
 
-# ============================================================
-# ★★★ Agnes 视频生成（带自动重试，解决队列满问题）
-# ============================================================
 @app.post("/api/agnes/generate-video")
 async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
-    """
-    后端代调 Agnes 视频生成（含轮询和代理下载）
-    ★ 关键改进：视频队列满时自动等待重试
-    """
     api_key = os.getenv("AGNES_API_KEY", "").strip()
     if not api_key:
         return {"success": False, "message": "AGNES_API_KEY 环境变量未设置"}
@@ -631,15 +775,13 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
         if "参考" not in req.prompt and "picture" not in req.prompt.lower():
             body["prompt"] = req.prompt + "。以 <Picture 1> 中的商品外观、色调和风格为参考，保持主体一致性。"
 
-    # ★★★ 队列满自动重试逻辑
     create_data = None
     last_err_msg = ""
-    max_create_attempts = 8  # 最多尝试 8 次（总等待 30+60+90+120+150+180+210 = 840s，但我们会控制总时间）
+    max_create_attempts = 8
     start_time = time.time()
-    total_timeout = 240  # 总共最长等待 240 秒（4 分钟）
+    total_timeout = 240
 
     for attempt in range(max_create_attempts):
-        # 检查总耗时
         elapsed = time.time() - start_time
         if elapsed > total_timeout:
             return {
@@ -662,19 +804,13 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
                 else:
                     err_text = r.text[:500]
                     last_err_msg = err_text
-                    # 队列满 → 等待后重试
                     if "video_queue_full" in err_text or "queue is full" in err_text.lower():
-                        wait = min(30 + 30 * attempt, 60)  # 每次等 30-60s
+                        wait = min(30 + 30 * attempt, 60)
                         print(f"[agnes-video] 队列满，{wait}s 后重试（{attempt+1}/{max_create_attempts}）")
                         await asyncio.sleep(wait)
                         continue
                     else:
-                        # 其他错误直接返回
-                        return {
-                            "success": False,
-                            "message": f"创建视频任务失败：{err_text}",
-                            "queue_full": False
-                        }
+                        return {"success": False, "message": f"创建视频任务失败：{err_text}"}
         except Exception as e:
             last_err_msg = str(e)
             print(f"[agnes-video] 异常: {e}，5s 后重试")
@@ -693,7 +829,6 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
     if not video_id:
         return {"success": False, "message": "未返回 video_id"}
 
-    # 轮询等待视频生成完成
     last_status = ""
     for i in range(300):
         await asyncio.sleep(2)
@@ -744,7 +879,7 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
 
 
 # ============================================================
-# 图片/视频代理（兼容旧接口）
+# 图片/视频代理
 # ============================================================
 class ProxyMediaRequest(BaseModel):
     media_url: str
@@ -975,7 +1110,7 @@ async def parse_generation(req: dict):
 
 
 # ============================================================
-# 商品智能匹配
+# 商品匹配（旧的，保留兼容）
 # ============================================================
 class MatchRequest(BaseModel):
     keywords: List[str]
@@ -2215,9 +2350,20 @@ async def root():
     base_url_info = os.getenv("PUBLIC_BASE_URL", "(未设置，使用 request.base_url)")
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含 Agnes 后端代理 + 视频队列自动重试）",
+        "message": "AI 助手后端服务运行中（含 5 级智能匹配 + 视频队列自动重试）",
         "public_base_url": base_url_info,
-        "AGNES_API_KEY_length": agnes_key_len
+        "AGNES_API_KEY_length": agnes_key_len,
+        "total_products": len(products),
+        "features": [
+            "Agnes 后端代理",
+            "5 级智能商品匹配",
+            "视频队列自动重试",
+            "AI 意图识别",
+            "AI 电商策略分析",
+            "临时图床",
+            "视频反解",
+            "素材持久化"
+        ]
     }
 
 
