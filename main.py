@@ -154,7 +154,6 @@ LOG_MAX = 1000
 # ============================================================
 @app.get("/api/debug/env")
 async def debug_env():
-    """查看当前环境变量是否生效（不暴露完整 Key，只显示前后几位）"""
     agnes_key = os.getenv("AGNES_API_KEY", "").strip()
     deepseek_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     public_url = os.getenv("PUBLIC_BASE_URL", "").strip()
@@ -172,30 +171,21 @@ async def debug_env():
         "AGNES_API_KEY_length": len(agnes_key),
         "DEEPSEEK_API_KEY": mask(deepseek_key),
         "DEEPSEEK_API_KEY_length": len(deepseek_key),
-        "PUBLIC_BASE_URL": public_url or "(未设置)",
-        "note": "如果 AGNES_API_KEY_length 是 0，说明环境变量没生效；正确值应该是 43 位左右"
+        "PUBLIC_BASE_URL": public_url or "(未设置)"
     }
 
 
 @app.get("/api/debug/agnes")
 async def debug_agnes():
-    """直接测试当前后端的 Agnes Key 是否有效"""
     api_key = os.getenv("AGNES_API_KEY", "").strip()
     if not api_key:
-        return {
-            "success": False,
-            "message": "AGNES_API_KEY 环境变量未设置或为空",
-            "key_length": 0
-        }
+        return {"success": False, "message": "AGNES_API_KEY 未设置", "key_length": 0}
 
     try:
         async with httpx.AsyncClient(timeout=60) as http:
             r = await http.post(
                 "https://apihub.agnes-ai.com/v1/images/generations",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json={
                     "model": "agnes-image-2.5-flash",
                     "prompt": "一杯绿茶，白色背景，简单",
@@ -205,31 +195,15 @@ async def debug_agnes():
                 }
             )
             if r.status_code != 200:
-                return {
-                    "success": False,
-                    "message": f"Agnes 返回 {r.status_code}",
-                    "error": r.text[:500],
-                    "key_prefix": api_key[:20],
-                    "key_length": len(api_key)
-                }
+                return {"success": False, "message": f"Agnes 返回 {r.status_code}", "error": r.text[:500]}
             data = r.json()
-            agnes_url = None
-            if data.get("data") and data["data"][0]:
-                agnes_url = data["data"][0].get("url")
             return {
                 "success": True,
                 "message": "Agnes Key 有效！",
-                "agnes_image_url": agnes_url,
-                "key_prefix": api_key[:8] + "...",
-                "key_length": len(api_key)
+                "agnes_image_url": data["data"][0].get("url") if data.get("data") else None
             }
     except Exception as e:
-        return {
-            "success": False,
-            "message": f"调用异常：{str(e)}",
-            "key_prefix": api_key[:8] + "...",
-            "key_length": len(api_key)
-        }
+        return {"success": False, "message": f"调用异常：{str(e)}"}
 
 
 # ============================================================
@@ -537,7 +511,7 @@ def _delete_file_by_url(url: str):
 
 
 # ============================================================
-# ★★★ 后端代调 Agnes（解决手机端所有网络/CORS问题）
+# ★★★ 后端代调 Agnes
 # ============================================================
 class AgnesImageRequest(BaseModel):
     prompt: str
@@ -558,10 +532,7 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
     """后端代调 Agnes 图片生成，返回自己域名下的 URL"""
     api_key = os.getenv("AGNES_API_KEY", "").strip()
     if not api_key:
-        return {
-            "success": False,
-            "message": "AGNES_API_KEY 环境变量未设置，请在 Railway 的 Variables 中配置"
-        }
+        return {"success": False, "message": "AGNES_API_KEY 环境变量未设置"}
 
     body = {
         "model": "agnes-image-2.5-flash",
@@ -585,12 +556,7 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
             if r.status_code != 200:
                 err_text = r.text[:500]
                 print(f"[agnes-image] HTTP {r.status_code}: {err_text}")
-                return {
-                    "success": False,
-                    "message": f"Agnes 返回 {r.status_code}: {err_text}",
-                    "key_prefix": api_key[:8] + "...",
-                    "key_length": len(api_key)
-                }
+                return {"success": False, "message": f"Agnes 返回 {r.status_code}: {err_text}"}
             data = r.json()
     except Exception as e:
         print(f"[agnes-image] 异常: {e}")
@@ -638,15 +604,18 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
     return {"success": True, "url": public_url}
 
 
+# ============================================================
+# ★★★ Agnes 视频生成（带自动重试，解决队列满问题）
+# ============================================================
 @app.post("/api/agnes/generate-video")
 async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
-    """后端代调 Agnes 视频生成（含轮询和代理下载）"""
+    """
+    后端代调 Agnes 视频生成（含轮询和代理下载）
+    ★ 关键改进：视频队列满时自动等待重试
+    """
     api_key = os.getenv("AGNES_API_KEY", "").strip()
     if not api_key:
-        return {
-            "success": False,
-            "message": "AGNES_API_KEY 环境变量未设置，请在 Railway 的 Variables 中配置"
-        }
+        return {"success": False, "message": "AGNES_API_KEY 环境变量未设置"}
 
     body = {
         "model": "agnes-video-2.5-flash",
@@ -662,28 +631,69 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
         if "参考" not in req.prompt and "picture" not in req.prompt.lower():
             body["prompt"] = req.prompt + "。以 <Picture 1> 中的商品外观、色调和风格为参考，保持主体一致性。"
 
-    try:
-        async with httpx.AsyncClient(timeout=60) as http:
-            r = await http.post(
-                "https://apihub.agnes-ai.com/v1/videos",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=body
-            )
-            if r.status_code != 200:
-                return {
-                    "success": False,
-                    "message": f"创建视频任务失败：{r.text[:300]}",
-                    "key_prefix": api_key[:8] + "...",
-                    "key_length": len(api_key)
-                }
-            create_data = r.json()
-    except Exception as e:
-        return {"success": False, "message": f"创建视频任务异常：{str(e)}"}
+    # ★★★ 队列满自动重试逻辑
+    create_data = None
+    last_err_msg = ""
+    max_create_attempts = 8  # 最多尝试 8 次（总等待 30+60+90+120+150+180+210 = 840s，但我们会控制总时间）
+    start_time = time.time()
+    total_timeout = 240  # 总共最长等待 240 秒（4 分钟）
+
+    for attempt in range(max_create_attempts):
+        # 检查总耗时
+        elapsed = time.time() - start_time
+        if elapsed > total_timeout:
+            return {
+                "success": False,
+                "message": f"视频队列持续繁忙，已等待 {int(elapsed)}s。请 5-10 分钟后再试。",
+                "queue_full": True
+            }
+
+        try:
+            async with httpx.AsyncClient(timeout=60) as http:
+                r = await http.post(
+                    "https://apihub.agnes-ai.com/v1/videos",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=body
+                )
+                if r.status_code == 200:
+                    create_data = r.json()
+                    print(f"[agnes-video] 第 {attempt+1} 次创建成功")
+                    break
+                else:
+                    err_text = r.text[:500]
+                    last_err_msg = err_text
+                    # 队列满 → 等待后重试
+                    if "video_queue_full" in err_text or "queue is full" in err_text.lower():
+                        wait = min(30 + 30 * attempt, 60)  # 每次等 30-60s
+                        print(f"[agnes-video] 队列满，{wait}s 后重试（{attempt+1}/{max_create_attempts}）")
+                        await asyncio.sleep(wait)
+                        continue
+                    else:
+                        # 其他错误直接返回
+                        return {
+                            "success": False,
+                            "message": f"创建视频任务失败：{err_text}",
+                            "queue_full": False
+                        }
+        except Exception as e:
+            last_err_msg = str(e)
+            print(f"[agnes-video] 异常: {e}，5s 后重试")
+            await asyncio.sleep(5)
+            continue
+
+    if not create_data:
+        return {
+            "success": False,
+            "message": f"视频队列持续繁忙，已尝试 {max_create_attempts} 次。请稍后重试。",
+            "queue_full": True,
+            "last_error": last_err_msg[:200]
+        }
 
     video_id = create_data.get("video_id")
     if not video_id:
         return {"success": False, "message": "未返回 video_id"}
 
+    # 轮询等待视频生成完成
     last_status = ""
     for i in range(300):
         await asyncio.sleep(2)
@@ -2205,10 +2215,9 @@ async def root():
     base_url_info = os.getenv("PUBLIC_BASE_URL", "(未设置，使用 request.base_url)")
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含 Agnes 后端代理 + AI意图识别 + 智能商品匹配 + AI电商策略分析 + 临时图床 + 视频反解 + 素材持久化）",
+        "message": "AI 助手后端服务运行中（含 Agnes 后端代理 + 视频队列自动重试）",
         "public_base_url": base_url_info,
-        "AGNES_API_KEY_length": agnes_key_len,
-        "debug_tip": "访问 /api/debug/env 查看环境变量详情，/api/debug/agnes 直接测试 Agnes Key"
+        "AGNES_API_KEY_length": agnes_key_len
     }
 
 
