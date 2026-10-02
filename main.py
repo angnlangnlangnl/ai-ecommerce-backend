@@ -138,7 +138,7 @@ client = OpenAI(
 )
 
 agnes_client = OpenAI(
-    api_key=os.getenv("AGNES_API_KEY", "sk-XmLjN9e3Mhh8wf"),
+    api_key=os.getenv("AGNES_API_KEY", ""),
     base_url="https://apihub.agnes-ai.com/v1"
 )
 
@@ -146,6 +146,90 @@ DATA_FILE = "products.json"
 LOG_FILE = "logs.json"
 TAG_FILE = "tags.json"
 LOG_MAX = 1000
+
+
+# ============================================================
+# ★★★ 新增：调试接口（判断环境变量和 Key 是否生效）
+# ============================================================
+@app.get("/api/debug/env")
+async def debug_env():
+    """查看当前环境变量是否生效（不暴露完整 Key，只显示前后几位）"""
+    agnes_key = os.getenv("AGNES_API_KEY", "").strip()
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    public_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+
+    def mask(k):
+        if not k:
+            return "(未设置)"
+        if len(k) <= 12:
+            return f"{k[:4]}...（共 {len(k)} 位）"
+        return f"{k[:8]}...{k[-4:]}（共 {len(k)} 位）"
+
+    return {
+        "status": "ok",
+        "AGNES_API_KEY": mask(agnes_key),
+        "AGNES_API_KEY_length": len(agnes_key),
+        "DEEPSEEK_API_KEY": mask(deepseek_key),
+        "DEEPSEEK_API_KEY_length": len(deepseek_key),
+        "PUBLIC_BASE_URL": public_url or "(未设置)",
+        "note": "如果 AGNES_API_KEY_length 是 17，说明读到的是旧截断值；正确值应该是 43 位左右"
+    }
+
+
+@app.get("/api/debug/agnes")
+async def debug_agnes():
+    """直接测试当前后端的 Agnes Key 是否有效"""
+    api_key = os.getenv("AGNES_API_KEY", "").strip()
+    if not api_key:
+        return {
+            "success": False,
+            "message": "AGNES_API_KEY 环境变量未设置或为空",
+            "key_length": 0
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as http:
+            r = await http.post(
+                "https://apihub.agnes-ai.com/v1/images/generations",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "agnes-image-2.5-flash",
+                    "prompt": "一杯绿茶，白色背景，简单",
+                    "size": "1K",
+                    "ratio": "1:1",
+                    "extra_body": {"response_format": "url"}
+                }
+            )
+            if r.status_code != 200:
+                return {
+                    "success": False,
+                    "message": f"Agnes 返回 {r.status_code}",
+                    "error": r.text[:500],
+                    "key_prefix": api_key[:20],
+                    "key_length": len(api_key)
+                }
+            data = r.json()
+            agnes_url = None
+            if data.get("data") and data["data"][0]:
+                agnes_url = data["data"][0].get("url")
+            return {
+                "success": True,
+                "message": "Agnes Key 有效！",
+                "agnes_image_url": agnes_url,
+                "key_prefix": api_key[:8] + "...",
+                "key_length": len(api_key)
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"调用异常：{str(e)}",
+            "key_prefix": api_key[:8] + "...",
+            "key_length": len(api_key)
+        }
+
 
 # ============================================================
 # 平台级类目树
@@ -452,7 +536,7 @@ def _delete_file_by_url(url: str):
 
 
 # ============================================================
-# ★★★ 新增：后端代调 Agnes（解决手机端所有网络/CORS问题）
+# ★★★ 后端代调 Agnes（解决手机端所有网络/CORS问题）
 # ============================================================
 class AgnesImageRequest(BaseModel):
     prompt: str
@@ -471,7 +555,12 @@ class AgnesVideoRequest(BaseModel):
 @app.post("/api/agnes/generate-image")
 async def agnes_generate_image(req: AgnesImageRequest, request: Request):
     """后端代调 Agnes 图片生成，返回自己域名下的 URL"""
-    api_key = os.getenv("AGNES_API_KEY", "sk-XmLjN9e3Mhh8wf")
+    api_key = os.getenv("AGNES_API_KEY", "").strip()
+    if not api_key:
+        return {
+            "success": False,
+            "message": "AGNES_API_KEY 环境变量未设置，请在 Railway 的 Variables 中配置"
+        }
 
     body = {
         "model": "agnes-image-2.5-flash",
@@ -495,7 +584,12 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
             if r.status_code != 200:
                 err_text = r.text[:500]
                 print(f"[agnes-image] HTTP {r.status_code}: {err_text}")
-                return {"success": False, "message": f"Agnes 返回 {r.status_code}: {err_text}"}
+                return {
+                    "success": False,
+                    "message": f"Agnes 返回 {r.status_code}: {err_text}",
+                    "key_prefix": api_key[:8] + "...",
+                    "key_length": len(api_key)
+                }
             data = r.json()
     except Exception as e:
         print(f"[agnes-image] 异常: {e}")
@@ -546,7 +640,12 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
 @app.post("/api/agnes/generate-video")
 async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
     """后端代调 Agnes 视频生成（含轮询和代理下载）"""
-    api_key = os.getenv("AGNES_API_KEY", "sk-XmLjN9e3Mhh8wf")
+    api_key = os.getenv("AGNES_API_KEY", "").strip()
+    if not api_key:
+        return {
+            "success": False,
+            "message": "AGNES_API_KEY 环境变量未设置，请在 Railway 的 Variables 中配置"
+        }
 
     body = {
         "model": "agnes-video-2.5-flash",
@@ -570,7 +669,12 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
                 json=body
             )
             if r.status_code != 200:
-                return {"success": False, "message": f"创建视频任务失败：{r.text[:300]}"}
+                return {
+                    "success": False,
+                    "message": f"创建视频任务失败：{r.text[:300]}",
+                    "key_prefix": api_key[:8] + "...",
+                    "key_length": len(api_key)
+                }
             create_data = r.json()
     except Exception as e:
         return {"success": False, "message": f"创建视频任务异常：{str(e)}"}
@@ -2096,11 +2200,14 @@ async def export_csv():
 
 @app.get("/")
 async def root():
+    agnes_key_len = len(os.getenv("AGNES_API_KEY", "").strip())
     base_url_info = os.getenv("PUBLIC_BASE_URL", "(未设置，使用 request.base_url)")
     return {
         "status": "ok",
         "message": "AI 助手后端服务运行中（含 Agnes 后端代理 + AI意图识别 + 智能商品匹配 + AI电商策略分析 + 临时图床 + 视频反解 + 素材持久化）",
-        "public_base_url": base_url_info
+        "public_base_url": base_url_info,
+        "AGNES_API_KEY_length": agnes_key_len,
+        "debug_tip": "访问 /api/debug/env 查看环境变量详情，/api/debug/agnes 直接测试 Agnes Key"
     }
 
 
