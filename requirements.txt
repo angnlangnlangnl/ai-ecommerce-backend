@@ -1,9 +1,11 @@
 fastapi
 uvicorn[standard]
 openai
+httpx
 python-dotenv
 python-multipart
-httpx
-opencv-python-headless
-numpy
 pydantic
+pdfplumber
+python-docx
+numpy
+scikit-learn
