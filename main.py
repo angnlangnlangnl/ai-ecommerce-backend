@@ -113,11 +113,94 @@ async def _periodic_cleanup():
         await asyncio.sleep(600)
 
 
+# ============================================================
+# ★★★ 多轮对话会话存储
+# ============================================================
+SESSIONS_FILE = Path(os.getenv("SESSIONS_FILE", "sessions.json")).resolve()
+SESSION_MAX_TURNS = 12
+SESSION_TTL = 3600 * 6
+SESSION_CLEANUP_INTERVAL = 1800
+
+
+def _load_sessions():
+    if SESSIONS_FILE.exists():
+        try:
+            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_sessions(sessions):
+    try:
+        with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sessions, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[_save_sessions] 失败: {e}")
+
+
+sessions_store = _load_sessions()
+
+
+def _cleanup_sessions():
+    now = time.time()
+    expired = [sid for sid, s in sessions_store.items()
+               if now - s.get("updated_at", 0) > SESSION_TTL]
+    for sid in expired:
+        sessions_store.pop(sid, None)
+    if expired:
+        _save_sessions(sessions_store)
+
+
+async def _periodic_session_cleanup():
+    while True:
+        try:
+            _cleanup_sessions()
+        except Exception as e:
+            print("[session cleanup] error:", e)
+        await asyncio.sleep(SESSION_CLEANUP_INTERVAL)
+
+
+def get_or_create_session(session_id: str) -> dict:
+    if not session_id:
+        session_id = uuid.uuid4().hex[:16]
+    s = sessions_store.get(session_id)
+    if not s:
+        s = {
+            "id": session_id,
+            "turns": [],
+            "last_generated": None,
+            "last_product": None,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+        sessions_store[session_id] = s
+    s["updated_at"] = time.time()
+    return s
+
+
+def append_turn(session: dict, role: str, text: str, **extra):
+    turn = {
+        "role": role,
+        "text": text or "",
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    turn.update(extra)
+    session["turns"].append(turn)
+    if len(session["turns"]) > SESSION_MAX_TURNS * 2:
+        session["turns"] = session["turns"][-SESSION_MAX_TURNS * 2:]
+    session["updated_at"] = time.time()
+    _save_sessions(sessions_store)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(_periodic_cleanup())
+    task1 = asyncio.create_task(_periodic_cleanup())
+    task2 = asyncio.create_task(_periodic_session_cleanup())
     yield
-    task.cancel()
+    task1.cancel()
+    task2.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -454,6 +537,7 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "proxy_video": "代理下载视频",
         "agnes_generate_image": "后端代调Agnes图片",
         "agnes_generate_video": "后端代调Agnes视频",
+        "remember_generation": "记录生成结果",
     }
     logs = load_logs()
     log_entry = {
@@ -510,7 +594,7 @@ def _delete_file_by_url(url: str):
 
 
 # ============================================================
-# ★★★ 智能匹配商品（5 级匹配）
+# 智能匹配商品（5 级匹配）
 # ============================================================
 class SmartMatchRequest(BaseModel):
     keyword: str
@@ -519,23 +603,11 @@ class SmartMatchRequest(BaseModel):
 
 @app.post("/api/products/smart-match")
 async def smart_match_products(req: SmartMatchRequest):
-    """
-    智能匹配商品（5 级匹配）
-    L1 商品名包含关键词          → 100%
-    L2 分类匹配                  → 80%
-    L2.5 字符包含（茶叶→茶）    → 70%
-    L3 子分类/subcat 匹配        → 65%
-    L4 tags 标签匹配             → 60%
-    L5 部分模糊匹配              → 50%
-    """
     keyword = req.keyword.strip()
     if not keyword:
         return {"success": False, "message": "缺少关键词", "has_match": False, "matched": []}
 
-    # 提取关键词的核心字符（用于 L2.5 模糊匹配）
-    # 例如"龙井茶" → 提取单字"茶"、"龙"、"井" 作为候选
     def extract_core_chars(kw):
-        """从关键词提取有意义的核心字符（中文字符，去停用词）"""
         stopwords = {'的', '了', '是', '在', '和', '与', '或', '及', '等', '个', '款', '种'}
         chars = set()
         for ch in kw:
@@ -561,54 +633,43 @@ async def smart_match_products(req: SmartMatchRequest):
             "category": p.get("category", "")
         })
 
-    # L1: 商品名包含关键词 → 100%
     for p in products:
         if keyword in p["name"]:
             add_match(p, 100, f"商品名包含「{keyword}」", "L1")
 
-    # L2: 分类匹配 → 80%
     for p in products:
         if keyword == p.get("category", "") or keyword in p.get("category", ""):
             add_match(p, 80, f"分类为「{p.get('category', '')}」", "L2")
 
-    # L2.5: 字符包含（核心字）→ 70%
-    # 例如关键词"龙井茶" 匹配商品名"云山茶叶礼盒"（因为都含"茶"字）
     if len(matches) < req.max_results * 2:
         for p in products:
             if p["name"] in matched_names:
                 continue
-            # 商品名包含关键词的任一个核心字符
             name_chars = set(p["name"])
             common = core_chars & name_chars
             if common and len(common) >= 1:
-                # 匹配字符越多分数越高
                 score = 70 if len(common) >= 2 else 65
                 add_match(p, score, f"包含核心字「{''.join(common)}」", "L2.5")
 
-    # L3: subcat 匹配 → 65%
     for p in products:
         subcat = p.get("subcat", "")
         if subcat and (keyword in subcat or subcat in keyword):
             add_match(p, 65, f"子分类为「{subcat}」", "L3")
 
-    # L4: tags 匹配 → 60%
     for p in products:
         tags = p.get("tags", [])
         if any(keyword in t or t in keyword for t in tags):
             hit_tags = [t for t in tags if keyword in t or t in keyword]
             add_match(p, 60, f"标签含「{'/'.join(hit_tags)}」", "L4")
 
-    # L5: 部分模糊匹配（关键词的任一字出现在商品名）→ 50%
     if len(matches) < req.max_results:
         for p in products:
             if p["name"] in matched_names:
                 continue
             name = p["name"]
-            # 关键词的任一字符出现在商品名
             if any(ch in name for ch in keyword):
                 add_match(p, 50, f"名称部分匹配", "L5")
 
-    # 排序、去重、截断
     matches.sort(key=lambda x: (-x["score"], x["product_name"]))
     matches = matches[:req.max_results]
 
@@ -635,7 +696,6 @@ class SuggestCategoryRequest(BaseModel):
 
 @app.post("/api/products/suggest-category")
 async def suggest_category(req: SuggestCategoryRequest):
-    """根据商品名智能推荐分类（用简单规则，不调 AI，速度快）"""
     keyword = req.keyword.strip()
 
     CATEGORY_KEYWORDS = {
@@ -645,7 +705,7 @@ async def suggest_category(req: SuggestCategoryRequest):
         "文创": ["丝巾", "折扇", "书签", "明信片", "文创", "国风", "香薰", "手工皂", "笔", "本", "画"],
     }
 
-    suggested = "文创"  # 默认
+    suggested = "文创"
     for cat, keywords in CATEGORY_KEYWORDS.items():
         for kw in keywords:
             if kw in keyword:
@@ -1011,45 +1071,217 @@ tools = [
 ]
 
 
+# ============================================================
+# ★★★ 多轮对话上下文 —— AI 意图识别
+# ============================================================
 class ChatRequest(BaseModel):
     text: str
+    session_id: Optional[str] = None
+    history: Optional[List[dict]] = None
+    last_generated: Optional[dict] = None
+    reference_context: Optional[dict] = None
+
+
+def _build_history_messages(session: Optional[dict], fallback_history: Optional[List[dict]]):
+    msgs = []
+
+    system_parts = [
+        "你是电商运营助手。用户会用自然语言下达指令。",
+        "你需要判断应该调用哪个工具，并提取参数。",
+        "如果用户只是闲聊或问问题，不要调用工具，直接回复。",
+        "",
+        "【上下文规则】",
+        "1. 若用户说'改成红色''再来一张''换成XX''继续'等，参考上文理解其指代对象。",
+        "2. 若上文提到某商品，'它''这个''刚才那个'都指该商品。",
+        "3. 若用户明确说出新商品名，以新商品为准。",
+    ]
+
+    if session:
+        lg = session.get("last_generated")
+        if lg:
+            system_parts.append("")
+            system_parts.append(
+                f"【最近一次生成】类型：{lg.get('kind')}，主题：{lg.get('theme')}，商品：{lg.get('product_name') or '无'}"
+            )
+        if session.get("last_product"):
+            system_parts.append(f"【最近操作的商品】{session['last_product']}")
+
+    msgs.append({"role": "system", "content": "\n".join(system_parts)})
+
+    turns = []
+    if session and session.get("turns"):
+        turns = session["turns"]
+    elif fallback_history:
+        turns = [{"role": t.get("role"), "text": t.get("text", "")} for t in fallback_history]
+
+    recent = turns[-SESSION_MAX_TURNS * 2:]
+    for t in recent:
+        role = t.get("role")
+        text = t.get("text", "")
+        if not text:
+            continue
+        if role == "user":
+            msgs.append({"role": "user", "content": text})
+        elif role == "ai":
+            msgs.append({"role": "assistant", "content": text[:200]})
+
+    return msgs
 
 
 @app.post("/api/ai/parse")
 async def parse_intent(req: ChatRequest):
+    session = None
+    if req.session_id:
+        session = get_or_create_session(req.session_id)
+
+    messages = _build_history_messages(session, req.history)
+
+    if req.last_generated and messages and messages[0]["role"] == "system":
+        lg = req.last_generated
+        extra = f"\n【前端上报的上次生成】类型：{lg.get('kind')}，主题：{lg.get('theme')}，商品：{lg.get('product_name') or '无'}"
+        messages[0]["content"] += extra
+
+    if req.reference_context and messages and messages[0]["role"] == "system":
+        rc = req.reference_context
+        extra = f"\n【用户当前参考素材】图片 {rc.get('images', 0)} 张，视频关键帧 {rc.get('keyframes', 0)} 张"
+        messages[0]["content"] += extra
+
+    messages.append({"role": "user", "content": req.text})
+
     try:
         response = client.chat.completions.create(
             model="deepseek-flash",
-            messages=[
-                {"role": "system", "content": (
-                    "你是电商运营助手。用户会用自然语言下达指令，"
-                    "你需要判断应该调用哪个工具，并提取参数。"
-                    "如果用户只是闲聊或问问题，不要调用工具，直接回复。"
-                )},
-                {"role": "user", "content": req.text}
-            ],
+            messages=messages,
             tools=tools,
             tool_choice="auto"
         )
         msg = response.choices[0].message
+
+        if session is not None:
+            append_turn(session, "user", req.text)
+
         if msg.tool_calls:
             call = msg.tool_calls[0]
-            return {"type": call.function.name, "args": json.loads(call.function.arguments)}
+            try:
+                args = json.loads(call.function.arguments)
+            except Exception:
+                args = {}
+            if session is not None:
+                append_turn(session, "ai", f"[调用 {call.function.name}]",
+                            type=call.function.name, args=args)
+                pn = args.get("product_name") or args.get("name")
+                if pn:
+                    session["last_product"] = pn
+                    _save_sessions(sessions_store)
+            return {
+                "type": call.function.name,
+                "args": args,
+                "session_id": session["id"] if session else None,
+            }
         else:
-            return {"type": "chat", "text": msg.content}
+            reply_text = msg.content or ""
+            if session is not None:
+                append_turn(session, "ai", reply_text, type="chat")
+            return {
+                "type": "chat",
+                "text": reply_text,
+                "session_id": session["id"] if session else None,
+            }
     except Exception as e:
         return {"type": "error", "text": str(e)}
 
 
+# ============================================================
+# ★★★ 记录最近一次生成结果
+# ============================================================
+class RememberGenRequest(BaseModel):
+    session_id: Optional[str] = None
+    kind: str
+    theme: Optional[str] = ""
+    product_name: Optional[str] = ""
+    urls: Optional[List[str]] = None
+    video_url: Optional[str] = None
+    poster_url: Optional[str] = None
+
+
+@app.post("/api/ai/remember-generation")
+async def remember_generation(req: RememberGenRequest):
+    if not req.session_id:
+        return {"success": False, "message": "缺少 session_id"}
+    session = get_or_create_session(req.session_id)
+    session["last_generated"] = {
+        "kind": req.kind,
+        "theme": req.theme or "",
+        "product_name": req.product_name or "",
+        "urls": req.urls or [],
+        "videoUrl": req.video_url or "",
+        "posterUrl": req.poster_url or "",
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _save_sessions(sessions_store)
+    add_log("remember_generation", {"kind": req.kind, "theme": req.theme}, "已记录", True)
+    return {"success": True, "message": "已记录", "last_generated": session["last_generated"]}
+
+
+@app.get("/api/ai/session/{session_id}")
+async def get_session(session_id: str):
+    s = sessions_store.get(session_id)
+    if not s:
+        return {"success": False, "message": "会话不存在或已过期"}
+    return {
+        "success": True,
+        "session": {
+            "id": s["id"],
+            "turns": s["turns"][-20:],
+            "last_generated": s.get("last_generated"),
+            "last_product": s.get("last_product"),
+        }
+    }
+
+
+@app.post("/api/ai/session/clear")
+async def clear_session(payload: dict):
+    sid = payload.get("session_id")
+    if sid and sid in sessions_store:
+        sessions_store.pop(sid, None)
+        _save_sessions(sessions_store)
+    return {"success": True}
+
+
+# ============================================================
+# ★★★ 生成意图识别（带上下文）
+# ============================================================
+class ParseGenRequest(BaseModel):
+    text: str
+    available_products: Optional[List[str]] = []
+    has_reference: Optional[bool] = False
+    ref_types: Optional[List[str]] = []
+    session_id: Optional[str] = None
+    last_generated: Optional[dict] = None
+
+
 @app.post("/api/ai/parse-generation")
-async def parse_generation(req: dict):
-    text = req.get('text', '')
-    available_products = req.get('available_products', [])
-    has_reference = req.get('has_reference', False)
-    ref_types = req.get('ref_types', [])
+async def parse_generation(req: ParseGenRequest):
+    text = req.text or ''
+    available_products = req.available_products or []
+    has_reference = req.has_reference or False
+    ref_types = req.ref_types or []
 
     if not text:
         return {"kind": None, "is_bound": False, "product_name": ""}
+
+    last_gen_hint = ""
+    last_product_hint = ""
+    if req.session_id and req.session_id in sessions_store:
+        s = sessions_store[req.session_id]
+        lg = s.get("last_generated")
+        if lg:
+            last_gen_hint = f"上一次生成了{lg.get('kind')}，主题「{lg.get('theme')}」，商品「{lg.get('product_name') or '无'}」"
+        if s.get("last_product"):
+            last_product_hint = f"上一次操作的商品是「{s['last_product']}」"
+    elif req.last_generated:
+        lg = req.last_generated
+        last_gen_hint = f"上一次生成了{lg.get('kind')}，主题「{lg.get('theme')}」，商品「{lg.get('product_name') or '无'}」"
 
     products_str = '、'.join(available_products) if available_products else '（暂无）'
     ref_str = f'有（{"/".join(ref_types)}）' if has_reference else '无'
@@ -1059,6 +1291,13 @@ async def parse_generation(req: dict):
 用户输入：{text}
 有无参考素材：{ref_str}
 可用商品列表：{products_str}
+{last_gen_hint}
+{last_product_hint}
+
+【上下文规则】
+- 若用户说"再来一张/再来一个/继续/同样的"，沿用上一次的 kind / theme / product_name
+- 若用户说"改成XX色/换成XX风格"，只改 extra_desc，其它沿用
+- 若用户明说新商品，覆盖上次的商品
 
 请严格返回以下 JSON 格式（不要 markdown 代码块，不要任何解释）：
 {{
@@ -1079,6 +1318,7 @@ async def parse_generation(req: dict):
 4. 若用户上传了参考素材 → 优先推荐生成同类素材
 5. 若文本含"海报" → kind=poster；含"视频" → kind=video；含"图/主图" → kind=images
 6. 若文本既无"生成"意图也无"操作"意图 → kind=null
+7. 若文本含"再来一张/继续/同样"，沿用 {last_gen_hint}
 """
 
     try:
@@ -1101,12 +1341,7 @@ async def parse_generation(req: dict):
         return result
     except Exception as e:
         print(f"[parse_generation] 失败: {e}")
-        return {
-            "kind": None,
-            "is_bound": False,
-            "product_name": "",
-            "error": str(e)
-        }
+        return {"kind": None, "is_bound": False, "product_name": "", "error": str(e)}
 
 
 # ============================================================
@@ -2350,10 +2585,11 @@ async def root():
     base_url_info = os.getenv("PUBLIC_BASE_URL", "(未设置，使用 request.base_url)")
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含 5 级智能匹配 + 视频队列自动重试）",
+        "message": "AI 助手后端服务运行中（含 5 级智能匹配 + 视频队列自动重试 + 多轮对话上下文）",
         "public_base_url": base_url_info,
         "AGNES_API_KEY_length": agnes_key_len,
         "total_products": len(products),
+        "total_sessions": len(sessions_store),
         "features": [
             "Agnes 后端代理",
             "5 级智能商品匹配",
@@ -2362,7 +2598,9 @@ async def root():
             "AI 电商策略分析",
             "临时图床",
             "视频反解",
-            "素材持久化"
+            "素材持久化",
+            "多轮对话上下文",
+            "上次生成结果记忆"
         ]
     }
 
