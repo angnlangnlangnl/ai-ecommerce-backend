@@ -29,6 +29,16 @@ if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # ============================================================
+# ★ 新增：导入销售型 AI 客服路由
+# ============================================================
+try:
+    from sales_agent import router as sales_router
+    SALES_AGENT_AVAILABLE = True
+except Exception as _sales_import_err:
+    print(f"[main] sales_agent 加载失败（不影响其它功能）: {_sales_import_err}")
+    SALES_AGENT_AVAILABLE = False
+
+# ============================================================
 # 目录配置
 # ============================================================
 TEMP_UPLOAD_DIR = Path(os.getenv("TEMP_UPLOAD_DIR", "temp_uploads")).resolve()
@@ -653,6 +663,18 @@ app.add_middleware(
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
+# ============================================================
+# ★ 挂载销售型 AI 客服路由
+# ============================================================
+if SALES_AGENT_AVAILABLE:
+    try:
+        app.include_router(sales_router)
+        print("[main] ✅ 销售型 AI 客服路由已挂载：/api/sales/chat, /api/sales/nudge, /api/sales/track")
+    except Exception as e:
+        print(f"[main] ❌ 销售型 AI 客服路由挂载失败: {e}")
+else:
+    print("[main] ⚠️ sales_agent 不可用，/api/sales/* 路由未挂载（其它功能不受影响）")
+
 client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY", "").strip() or "placeholder-no-key",
     base_url="https://api.deepseek.com"
@@ -689,7 +711,8 @@ async def debug_env():
         "AGNES_API_KEY_length": len(agnes_key),
         "DEEPSEEK_API_KEY": mask(deepseek_key),
         "DEEPSEEK_API_KEY_length": len(deepseek_key),
-        "PUBLIC_BASE_URL": public_url or "(未设置)"
+        "PUBLIC_BASE_URL": public_url or "(未设置)",
+        "sales_agent_available": SALES_AGENT_AVAILABLE
     }
 
 
@@ -1849,7 +1872,7 @@ async def market_analysis(req: MarketAnalysisRequest):
 
 
 # ============================================================
-# ★ AI 智能推荐商品（新增）
+# ★ AI 智能推荐商品
 # ============================================================
 class RecommendProductsRequest(BaseModel):
     text: str
@@ -1921,7 +1944,7 @@ async def recommend_products(req: RecommendProductsRequest):
 
 
 # ============================================================
-# ★ 卡片点击追踪（新增）
+# ★ 卡片点击追踪
 # ============================================================
 class TrackClickRequest(BaseModel):
     product_id: Optional[int] = None
@@ -1945,7 +1968,7 @@ async def track_card_click(req: TrackClickRequest):
 
 
 # ============================================================
-# ★ 优惠券（新增）
+# ★ 优惠券
 # ============================================================
 @app.get("/api/coupons")
 async def get_coupons():
@@ -3294,9 +3317,10 @@ async def root():
     clicks = load_card_clicks()
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 商品卡片 + 优惠券 + 点击追踪）",
+        "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 商品卡片 + 优惠券 + 点击追踪 + 销售型 AI 客服）",
         "public_base_url": base_url_info,
         "AGNES_API_KEY_length": agnes_key_len,
+        "sales_agent_available": SALES_AGENT_AVAILABLE,
         "total_products": len(products),
         "total_sessions": len(sessions_store),
         "total_knowledge": len(kb_meta.get("items", [])),
@@ -3323,12 +3347,13 @@ async def root():
             "访问统计",
             "AI 自动提炼 FAQ",
             "图片/视频资产库",
-            "★ 商品链接卡片",
-            "★ 卡片点击追踪",
-            "★ 卡片样式自定义",
-            "★ 多商品卡片轮播",
-            "★ 优惠券卡片",
-            "★ AI 智能选品（DeepSeek）"
+            "商品链接卡片",
+            "卡片点击追踪",
+            "卡片样式自定义",
+            "多商品卡片轮播",
+            "优惠券卡片",
+            "AI 智能选品（DeepSeek）",
+            "★ 销售型 AI 客服（状态机 + 知识库 + 推荐 + 成交学习）",
         ]
     }
 
