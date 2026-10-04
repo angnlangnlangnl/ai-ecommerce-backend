@@ -3296,6 +3296,227 @@ async def decompose_video(req: DecomposeRequest):
 
 
 # ============================================================
+# ★ AI 看图识内容
+# ============================================================
+class AnalyzeImageRequest(BaseModel):
+    image_urls: List[str]
+    question: str = "请描述这些图片的内容"
+    session_id: Optional[str] = None
+
+
+@app.post("/api/ai/analyze-image")
+async def analyze_image(req: AnalyzeImageRequest):
+    """
+    用 Agnes 多模态模型识别图片内容
+    支持：商品识别、文字读取、风格分析、槽位建议
+    """
+    if not req.image_urls or len(req.image_urls) == 0:
+        return {"success": False, "message": "缺少图片"}
+
+    # 组织多模态消息
+    user_content = [{"type": "text", "text": req.question}]
+    for url in req.image_urls[:5]:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": url}
+        })
+
+    system_prompt = (
+        "你是资深电商图片分析专家。你能看懂图片里的商品、文字、颜色、材质、风格、构图。\n"
+        "请用简洁、准确的中文回答，重点识别：\n"
+        "1. 商品是什么（品类、名称猜测）\n"
+        "2. 颜色/材质/风格\n"
+        "3. 适合作为商品图的哪个位置（主图 / 副图 / 详情图）\n"
+        "4. 如果是多张图，按顺序分别说明"
+    )
+
+    # 多模型依次尝试（Agnes 多模态）
+    multimodal_models = [
+        os.getenv("AGNES_VL_MODEL", "agnes-vl-2.0"),
+        "agnes-3.0-flash",
+        "agnes-vl-2.0",
+    ]
+    # 去重保序
+    seen = set()
+    models = []
+    for m in multimodal_models:
+        if m not in seen:
+            seen.add(m)
+            models.append(m)
+
+    last_err = None
+    for model_name in models:
+        try:
+            response = agnes_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                temperature=0.3,
+                max_tokens=800
+            )
+            text = response.choices[0].message.content.strip()
+            add_log("analyze_image", {"count": len(req.image_urls), "model": model_name},
+                    f"识别成功（{len(text)} 字）", True)
+            return {"success": True, "text": text, "model": model_name}
+        except Exception as e:
+            last_err = str(e)
+            print(f"[analyze_image] {model_name} 失败: {e}")
+            continue
+
+    add_log("analyze_image", {"count": len(req.image_urls)}, f"全部模型失败：{last_err}", False)
+    return {"success": False, "message": f"图片识别失败：{last_err or '所有多模态模型不可用'}"}
+
+
+@app.post("/api/ai/auto-replace-from-images")
+async def auto_replace_from_images(req: dict):
+    """
+    全自动链路：图片 → AI 识别 → 商品匹配 → 执行替换
+    输入：{ image_urls: [...], hint: "可选，用户提供的商品名提示" }
+    """
+    image_urls = req.get("image_urls") or []
+    hint = (req.get("hint") or "").strip()
+
+    if not image_urls:
+        return {"success": False, "message": "缺少图片"}
+
+    # 1. AI 识别图片
+    ask = "请用简洁中文回答：这些图片是什么商品？适合作为商品图的哪个位置（主图/副图/详情图）？"
+    if hint:
+        ask += f"（用户提示：可能是「{hint}」相关商品）"
+
+    user_content = [{"type": "text", "text": ask}]
+    for url in image_urls[:5]:
+        user_content.append({"type": "image_url", "image_url": {"url": url}})
+
+    system_prompt = (
+        "你是电商图片分析专家。请严格按以下 JSON 格式输出（不要 markdown 代码块）：\n"
+        "{\n"
+        '  "product_name": "识别到的商品名（尽量简短、能匹配商品库）",\n'
+        '  "description": "一句话描述图片内容",\n'
+        '  "suggested_slot": "main_image | sub_images | detail_html 三选一",\n'
+        '  "confidence": 0.0-1.0 的浮点数\n'
+        "}"
+    )
+
+    recognized = None
+    last_err = None
+    models = list(dict.fromkeys([
+        os.getenv("AGNES_VL_MODEL", "agnes-vl-2.0"),
+        "agnes-3.0-flash",
+        "agnes-vl-2.0",
+    ]))
+    for model_name in models:
+        try:
+            response = agnes_client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                temperature=0.1,
+                max_tokens=400
+            )
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                parts = raw.split("```")
+                if len(parts) >= 2:
+                    raw = parts[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                    raw = raw.strip()
+            recognized = json.loads(raw)
+            break
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+    if not recognized:
+        return {"success": False, "message": f"图片识别失败：{last_err}"}
+
+    product_name = (recognized.get("product_name") or "").strip()
+    if hint and (not product_name or len(product_name) < 2):
+        product_name = hint
+
+    if not product_name:
+        return {
+            "success": False,
+            "message": "未能从图片中识别出商品名，请手动指定",
+            "recognized": recognized
+        }
+
+    # 2. 商品匹配（多级尝试）
+    matched_product = None
+    match_by = ""
+
+    # 2a. 精确 / 包含
+    clean = product_name.replace(" ", "").lower()
+    for p in products:
+        pn = p["name"].replace(" ", "").lower()
+        if pn == clean:
+            matched_product = p; match_by = "exact"; break
+    if not matched_product:
+        for p in products:
+            pn = p["name"].replace(" ", "").lower()
+            if pn in clean or clean in pn:
+                matched_product = p; match_by = "contains"; break
+
+    # 2b. 别名
+    if not matched_product:
+        aliases = {
+            "茶叶": "茶叶", "茶": "茶", "礼盒": "礼盒", "竹编": "竹编", "核桃": "核桃",
+            "皂": "皂", "陶瓷": "陶瓷", "杯": "陶瓷", "折扇": "扇", "扇": "扇",
+            "姜茶": "姜茶", "红糖": "姜茶", "丝巾": "丝巾",
+        }
+        for key, val in aliases.items():
+            if key in clean:
+                for p in products:
+                    if val in p["name"]:
+                        matched_product = p; match_by = "alias"; break
+                if matched_product:
+                    break
+
+    if not matched_product:
+        return {
+            "success": False,
+            "message": f"未能匹配到商品「{product_name}」",
+            "recognized": recognized
+        }
+
+    # 3. 组装 sync payload
+    slot = recognized.get("suggested_slot") or "main_image"
+    payload = {"product_names": [matched_product["name"]], "mode": "replace"}
+    if slot == "main_image":
+        payload["main_image"] = image_urls[0]
+        if len(image_urls) > 1:
+            payload["sub_images"] = image_urls[1:6]
+    elif slot == "sub_images":
+        payload["sub_images"] = image_urls[:5]
+    elif slot == "detail_html":
+        parts = [f'<img src="{u}" style="width:100%;display:block;margin:0;padding:0;" />' for u in image_urls[:10]]
+        payload["detail_html"] = f'<div style="max-width:100%;overflow:hidden;">{"".join(parts)}</div>'
+    else:
+        payload["main_image"] = image_urls[0]
+
+    add_log("auto_replace_from_images",
+            {"product": matched_product["name"], "slot": slot, "count": len(image_urls)},
+            f"识别并匹配成功（{match_by}）", True)
+
+    return {
+        "success": True,
+        "recognized": recognized,
+        "matched_product": {
+            "id": matched_product["id"],
+            "name": matched_product["name"],
+            "price": matched_product.get("price", 0),
+        },
+        "match_by": match_by,
+        "slot": slot,
+        "sync_payload": payload,
+    }
+
+# ============================================================
 # CSV & 根路径
 # ============================================================
 @app.get("/api/export/csv")
