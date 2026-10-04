@@ -51,8 +51,6 @@ KB_META_FILE = KB_DIR / "_meta.json"
 KB_ALLOWED_EXT = {".txt", ".md", ".markdown", ".json", ".csv", ".pdf", ".docx"}
 KB_MAX_FILE_SIZE = 20 * 1024 * 1024
 
-KB_VECTOR_FILE = KB_DIR / "_vectors.json"
-
 ASSETS_DIR = Path(os.getenv("ASSETS_DIR", "assets_lib")).resolve()
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 (ASSETS_DIR / "images").mkdir(exist_ok=True)
@@ -67,6 +65,10 @@ SESSIONS_FILE = Path(os.getenv("SESSIONS_FILE", "sessions.json")).resolve()
 SESSION_MAX_TURNS = 12
 SESSION_TTL = 3600 * 6
 SESSION_CLEANUP_INTERVAL = 1800
+
+# ★ 新增文件
+COUPON_FILE = Path(os.getenv("COUPON_FILE", "coupons.json")).resolve()
+CARD_CLICK_FILE = Path(os.getenv("CARD_CLICK_FILE", "card_clicks.json")).resolve()
 
 
 def get_public_base_url(request: Request) -> str:
@@ -210,7 +212,7 @@ def append_turn(session: dict, role: str, text: str, **extra):
 
 
 # ============================================================
-# 知识库元数据
+# 知识库
 # ============================================================
 DEFAULT_KB_CATEGORIES = [
     {"id": "cat_faq", "name": "FAQ", "icon": "❓", "parent_id": None,
@@ -245,21 +247,14 @@ def _load_kb_meta():
         try:
             with open(KB_META_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if "items" not in data:
-                    data["items"] = []
-                if "next_id" not in data:
-                    data["next_id"] = 1
-                if "categories" not in data:
-                    data["categories"] = DEFAULT_KB_CATEGORIES
+                if "items" not in data: data["items"] = []
+                if "next_id" not in data: data["next_id"] = 1
+                if "categories" not in data: data["categories"] = DEFAULT_KB_CATEGORIES
+                if "stats" not in data: data["stats"] = {}
                 return data
         except Exception:
             pass
-    return {
-        "items": [],
-        "next_id": 1,
-        "categories": DEFAULT_KB_CATEGORIES,
-        "stats": {}  # { item_id: { "hit_count": 0, "last_hit": "", "satisfied": 0, "unsatisfied": 0 } }
-    }
+    return {"items": [], "next_id": 1, "categories": DEFAULT_KB_CATEGORIES, "stats": {}}
 
 
 def _save_kb_meta(meta):
@@ -271,7 +266,6 @@ def _save_kb_meta(meta):
 
 
 def _extract_text_from_file(file_path: Path, ext: str) -> str:
-    """支持 txt/md/json/csv/pdf/docx"""
     try:
         if ext in (".txt", ".md", ".markdown"):
             return file_path.read_text(encoding="utf-8", errors="replace")
@@ -337,13 +331,12 @@ def _extract_text_from_file(file_path: Path, ext: str) -> str:
 
 
 # ============================================================
-# 向量检索（TF-IDF）
+# 向量检索
 # ============================================================
 _kb_vector_cache = {"matrix": None, "vectorizer": None, "ids": []}
 
 
 def _rebuild_kb_vectors():
-    """用 TF-IDF 重建向量索引"""
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
         import numpy as np
@@ -378,12 +371,7 @@ def _rebuild_kb_vectors():
         return
 
     try:
-        vectorizer = TfidfVectorizer(
-            analyzer="char_wb",
-            ngram_range=(2, 3),
-            min_df=1,
-            max_features=5000
-        )
+        vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 3), min_df=1, max_features=5000)
         matrix = vectorizer.fit_transform(corpus)
         _kb_vector_cache["matrix"] = matrix
         _kb_vector_cache["vectorizer"] = vectorizer
@@ -397,7 +385,6 @@ def _rebuild_kb_vectors():
 
 
 def _vector_search(query: str, top_k: int = 5):
-    """向量检索，返回 [{item, score}]"""
     try:
         import numpy as np
         from sklearn.metrics.pairwise import cosine_similarity
@@ -431,9 +418,6 @@ def _vector_search(query: str, top_k: int = 5):
         return None
 
 
-# ============================================================
-# 关键词检索（兜底）
-# ============================================================
 def _tokenize_keyword(text: str):
     if not text:
         return set()
@@ -483,11 +467,7 @@ def _keyword_search(query: str, top_k: int = 5):
     return [{"item": item, "score": score} for score, item in scored[:top_k]]
 
 
-# ============================================================
-# 混合检索（向量 + 关键词）
-# ============================================================
 def search_knowledge_hybrid(query: str, top_k: int = 3):
-    """优先向量，兜底关键词，合并去重"""
     vector_results = _vector_search(query, top_k=top_k * 2)
     keyword_results = _keyword_search(query, top_k=top_k * 2)
 
@@ -495,11 +475,7 @@ def search_knowledge_hybrid(query: str, top_k: int = 3):
     if vector_results:
         for r in vector_results:
             item_id = r["item"]["id"]
-            merged[item_id] = {
-                "item": r["item"],
-                "score": r["score"] * 1.2,  # 向量权重稍高
-                "match_type": "vector"
-            }
+            merged[item_id] = {"item": r["item"], "score": r["score"] * 1.2, "match_type": "vector"}
     if keyword_results:
         for r in keyword_results:
             item_id = r["item"]["id"]
@@ -507,25 +483,17 @@ def search_knowledge_hybrid(query: str, top_k: int = 3):
                 merged[item_id]["score"] += r["score"] * 0.8
                 merged[item_id]["match_type"] = "hybrid"
             else:
-                merged[item_id] = {
-                    "item": r["item"],
-                    "score": r["score"],
-                    "match_type": "keyword"
-                }
+                merged[item_id] = {"item": r["item"], "score": r["score"], "match_type": "keyword"}
 
     results = sorted(merged.values(), key=lambda x: -x["score"])[:top_k]
     return results
 
 
-# 兼容旧接口
 def search_knowledge(query: str, top_k: int = 3):
     results = search_knowledge_hybrid(query, top_k)
     return [r["item"] for r in results]
 
 
-# ============================================================
-# 访问统计
-# ============================================================
 def record_kb_hit(item_id: str):
     meta = _load_kb_meta()
     if "stats" not in meta:
@@ -550,26 +518,19 @@ def record_kb_feedback(item_id: str, satisfied: bool):
     _save_kb_meta(meta)
 
 
-# ============================================================
-# 分类树工具
-# ============================================================
-def flatten_categories(tree, result=None):
-    if result is None:
-        result = []
-    for node in tree:
-        result.append({
-            "id": node["id"],
-            "name": node["name"],
-            "icon": node.get("icon", ""),
-            "parent_id": node.get("parent_id")
-        })
+def _find_category_name(categories, cat_id):
+    for node in categories:
+        if node["id"] == cat_id:
+            return node["name"]
         if node.get("children"):
-            flatten_categories(node["children"], result)
-    return result
+            name = _find_category_name(node["children"], cat_id)
+            if name:
+                return name
+    return cat_id or "未分类"
 
 
 # ============================================================
-# 资产库元数据
+# 资产库
 # ============================================================
 def _load_assets_meta():
     if ASSETS_META_FILE.exists():
@@ -622,13 +583,55 @@ def search_assets(query: str, asset_type: str = "all", top_k: int = 6):
 
 
 # ============================================================
+# ★ 优惠券
+# ============================================================
+def load_coupons():
+    if COUPON_FILE.exists():
+        try:
+            with open(COUPON_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return [
+        {"id": "cp1", "code": "NEW20", "name": "新客专享券", "discount": 20, "threshold": 100,
+         "desc": "新人首单立减", "expire_at": "2026-12-31"},
+        {"id": "cp2", "code": "VIP50", "name": "VIP 会员券", "discount": 50, "threshold": 300,
+         "desc": "会员专享 满300减50", "expire_at": "2026-12-31"},
+        {"id": "cp3", "code": "FREESHIP", "name": "包邮券", "discount": 8, "threshold": 0,
+         "desc": "全店包邮", "expire_at": "2026-12-31"},
+    ]
+
+
+def save_coupons(coupons):
+    with open(COUPON_FILE, "w", encoding="utf-8") as f:
+        json.dump(coupons, f, ensure_ascii=False, indent=2)
+
+
+# ============================================================
+# ★ 卡片点击追踪
+# ============================================================
+def load_card_clicks():
+    if CARD_CLICK_FILE.exists():
+        try:
+            with open(CARD_CLICK_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"total_shown": 0, "total_clicked": 0, "by_product": {}}
+
+
+def save_card_clicks(data):
+    with open(CARD_CLICK_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ============================================================
 # lifespan
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task1 = asyncio.create_task(_periodic_cleanup())
     task2 = asyncio.create_task(_periodic_session_cleanup())
-    # 启动时重建知识库向量
     try:
         _rebuild_kb_vectors()
     except Exception as e:
@@ -667,7 +670,7 @@ LOG_MAX = 1000
 
 
 # ============================================================
-# 调试接口
+# 调试
 # ============================================================
 @app.get("/api/debug/env")
 async def debug_env():
@@ -676,10 +679,8 @@ async def debug_env():
     public_url = os.getenv("PUBLIC_BASE_URL", "").strip()
 
     def mask(k):
-        if not k:
-            return "(未设置)"
-        if len(k) <= 12:
-            return f"{k[:4]}...（共 {len(k)} 位）"
+        if not k: return "(未设置)"
+        if len(k) <= 12: return f"{k[:4]}...（共 {len(k)} 位）"
         return f"{k[:8]}...{k[-4:]}（共 {len(k)} 位）"
 
     return {
@@ -702,22 +703,12 @@ async def debug_agnes():
             r = await http.post(
                 "https://apihub.agnes-ai.com/v1/images/generations",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": "agnes-image-2.5-flash",
-                    "prompt": "一杯绿茶，白色背景，简单",
-                    "size": "1K",
-                    "ratio": "1:1",
-                    "extra_body": {"response_format": "url"}
-                }
+                json={"model": "agnes-image-2.5-flash", "prompt": "一杯绿茶，白色背景，简单", "size": "1K", "ratio": "1:1", "extra_body": {"response_format": "url"}}
             )
             if r.status_code != 200:
                 return {"success": False, "message": f"Agnes 返回 {r.status_code}", "error": r.text[:500]}
             data = r.json()
-            return {
-                "success": True,
-                "message": "Agnes Key 有效！",
-                "agnes_image_url": data["data"][0].get("url") if data.get("data") else None
-            }
+            return {"success": True, "message": "Agnes Key 有效！", "agnes_image_url": data["data"][0].get("url") if data.get("data") else None}
     except Exception as e:
         return {"success": False, "message": f"调用异常：{str(e)}"}
 
@@ -728,68 +719,49 @@ async def debug_agnes():
 CATEGORY_TREE = [
     {"id": "cat_food", "name": "食品", "icon": "🍜", "children": [
         {"id": "cat_food_nuts", "name": "坚果", "children": [
-            {"id": "cat_food_nuts_pistachio", "name": "开心果"},
-            {"id": "cat_food_nuts_walnut", "name": "核桃"},
-            {"id": "cat_food_nuts_almond", "name": "巴旦木"},
+            {"id": "cat_food_nuts_pistachio", "name": "开心果"}, {"id": "cat_food_nuts_walnut", "name": "核桃"}, {"id": "cat_food_nuts_almond", "name": "巴旦木"},
         ]},
         {"id": "cat_food_tea", "name": "茶饮", "children": [
-            {"id": "cat_food_tea_green", "name": "绿茶"},
-            {"id": "cat_food_tea_black", "name": "红茶"},
-            {"id": "cat_food_tea_oolong", "name": "乌龙茶"},
+            {"id": "cat_food_tea_green", "name": "绿茶"}, {"id": "cat_food_tea_black", "name": "红茶"}, {"id": "cat_food_tea_oolong", "name": "乌龙茶"},
         ]},
         {"id": "cat_food_snack", "name": "零食", "children": [
-            {"id": "cat_food_snack_candy", "name": "糖果"},
-            {"id": "cat_food_snack_dried", "name": "果干"},
-            {"id": "cat_food_snack_meat", "name": "肉干"},
+            {"id": "cat_food_snack_candy", "name": "糖果"}, {"id": "cat_food_snack_dried", "name": "果干"}, {"id": "cat_food_snack_meat", "name": "肉干"},
         ]},
         {"id": "cat_food_health", "name": "滋补", "children": [
-            {"id": "cat_food_health_tea", "name": "养生茶"},
-            {"id": "cat_food_health_soup", "name": "汤料"},
+            {"id": "cat_food_health_tea", "name": "养生茶"}, {"id": "cat_food_health_soup", "name": "汤料"},
         ]},
     ]},
     {"id": "cat_handicraft", "name": "手工艺", "icon": "🎨", "children": [
         {"id": "cat_handicraft_weave", "name": "编织", "children": [
-            {"id": "cat_handicraft_weave_bamboo", "name": "竹编"},
-            {"id": "cat_handicraft_weave_rattan", "name": "藤编"},
-            {"id": "cat_handicraft_weave_cloth", "name": "布艺"},
+            {"id": "cat_handicraft_weave_bamboo", "name": "竹编"}, {"id": "cat_handicraft_weave_rattan", "name": "藤编"}, {"id": "cat_handicraft_weave_cloth", "name": "布艺"},
         ]},
         {"id": "cat_handicraft_ceramic", "name": "陶瓷", "children": [
-            {"id": "cat_handicraft_ceramic_cup", "name": "陶瓷杯"},
-            {"id": "cat_handicraft_ceramic_plate", "name": "陶瓷盘"},
-            {"id": "cat_handicraft_ceramic_teapot", "name": "陶瓷壶"},
+            {"id": "cat_handicraft_ceramic_cup", "name": "陶瓷杯"}, {"id": "cat_handicraft_ceramic_plate", "name": "陶瓷盘"}, {"id": "cat_handicraft_ceramic_teapot", "name": "陶瓷壶"},
         ]},
         {"id": "cat_handicraft_wood", "name": "木艺", "children": [
-            {"id": "cat_handicraft_wood_box", "name": "木盒"},
-            {"id": "cat_handicraft_wood_toy", "name": "木制玩具"},
+            {"id": "cat_handicraft_wood_box", "name": "木盒"}, {"id": "cat_handicraft_wood_toy", "name": "木制玩具"},
         ]},
     ]},
     {"id": "cat_tea", "name": "茶叶", "icon": "🍃", "children": [
         {"id": "cat_tea_green", "name": "绿茶", "children": [
-            {"id": "cat_tea_green_longjing", "name": "龙井"},
-            {"id": "cat_tea_green_biluochun", "name": "碧螺春"},
+            {"id": "cat_tea_green_longjing", "name": "龙井"}, {"id": "cat_tea_green_biluochun", "name": "碧螺春"},
         ]},
         {"id": "cat_tea_black", "name": "红茶", "children": [
-            {"id": "cat_tea_black_junshan", "name": "君山银针"},
-            {"id": "cat_tea_black_keemun", "name": "祁门红茶"},
+            {"id": "cat_tea_black_junshan", "name": "君山银针"}, {"id": "cat_tea_black_keemun", "name": "祁门红茶"},
         ]},
         {"id": "cat_tea_oolong", "name": "乌龙茶", "children": [
-            {"id": "cat_tea_oolong_tieguanyin", "name": "铁观音"},
-            {"id": "cat_tea_oolong_dahongpao", "name": "大红袍"},
+            {"id": "cat_tea_oolong_tieguanyin", "name": "铁观音"}, {"id": "cat_tea_oolong_dahongpao", "name": "大红袍"},
         ]},
     ]},
     {"id": "cat_cultural", "name": "文创", "icon": "📚", "children": [
         {"id": "cat_cultural_paper", "name": "纸艺", "children": [
-            {"id": "cat_cultural_paper_fan", "name": "折扇"},
-            {"id": "cat_cultural_paper_card", "name": "明信片"},
-            {"id": "cat_cultural_paper_bookmark", "name": "书签"},
+            {"id": "cat_cultural_paper_fan", "name": "折扇"}, {"id": "cat_cultural_paper_card", "name": "明信片"}, {"id": "cat_cultural_paper_bookmark", "name": "书签"},
         ]},
         {"id": "cat_cultural_fabric", "name": "布艺", "children": [
-            {"id": "cat_cultural_fabric_scarf", "name": "丝巾"},
-            {"id": "cat_cultural_fabric_bag", "name": "布包"},
+            {"id": "cat_cultural_fabric_scarf", "name": "丝巾"}, {"id": "cat_cultural_fabric_bag", "name": "布包"},
         ]},
         {"id": "cat_cultural_soap", "name": "香道", "children": [
-            {"id": "cat_cultural_soap_handmade", "name": "手工皂"},
-            {"id": "cat_cultural_soap_scent", "name": "香薰"},
+            {"id": "cat_cultural_soap_handmade", "name": "手工皂"}, {"id": "cat_cultural_soap_scent", "name": "香薰"},
         ]},
     ]},
 ]
@@ -798,17 +770,11 @@ CATEGORY_MAP = {}
 
 
 def build_category_map(tree, parent_path=None):
-    if parent_path is None:
-        parent_path = []
+    if parent_path is None: parent_path = []
     for node in tree:
         node_id = node["id"]
         path = parent_path + [{"id": node_id, "name": node["name"]}]
-        CATEGORY_MAP[node_id] = {
-            "name": node["name"],
-            "path": path,
-            "level": len(path),
-            "parent_id": parent_path[-1]["id"] if parent_path else None,
-        }
+        CATEGORY_MAP[node_id] = {"name": node["name"], "path": path, "level": len(path), "parent_id": parent_path[-1]["id"] if parent_path else None}
         if "children" in node:
             build_category_map(node["children"], path)
 
@@ -847,6 +813,8 @@ def load_products():
                     if "third" not in p: p["third"] = ""
                     if "tags" not in p: p["tags"] = []
                     if "category_path" not in p: p["category_path"] = []
+                    if "url" not in p: p["url"] = ""
+                    if "original_price" not in p: p["original_price"] = None
                 return data
         except Exception:
             return DEFAULT_PRODUCTS
@@ -859,6 +827,26 @@ def save_products(products):
 
 
 products = load_products()
+
+
+def _build_product_url(p):
+    """根据平台生成商品跳转链接"""
+    if p.get("url"):
+        return p["url"]
+    platform = p.get("platform", "")
+    sku = p.get("sku", "")
+    import urllib.parse
+    name = urllib.parse.quote(p.get("name", ""))
+    if "淘宝" in platform:
+        return f"https://s.taobao.com/search?q={name}"
+    elif "抖音" in platform:
+        return f"https://haohuo.jinritemai.com/views/product/detail?id={sku}"
+    elif "拼多多" in platform:
+        return f"https://mobile.yangkeduo.com/search_result.html?search_key={name}"
+    elif "京东" in platform:
+        return f"https://search.jd.com/Search?keyword={name}"
+    return ""
+
 
 # ============================================================
 # 标签
@@ -952,7 +940,10 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "kb_auto_generate": "AI自动提炼FAQ",
         "kb_feedback": "知识库反馈",
         "asset_upload": "上传资产",
+        "asset_update": "编辑资产",
         "asset_delete": "删除资产",
+        "track_card_click": "卡片点击追踪",
+        "recommend_products": "AI推荐商品",
     }
     logs = load_logs()
     log_entry = {
@@ -1009,7 +1000,7 @@ def _delete_file_by_url(url: str):
 
 
 # ============================================================
-# 智能匹配商品
+# 商品智能匹配
 # ============================================================
 class SmartMatchRequest(BaseModel):
     keyword: str
@@ -1035,29 +1026,21 @@ async def smart_match_products(req: SmartMatchRequest):
     matches = []
 
     def add_match(p, score, reason, level):
-        if p["name"] in matched_names:
-            return
+        if p["name"] in matched_names: return
         matched_names.add(p["name"])
         matches.append({
-            "product_name": p["name"],
-            "score": score,
-            "reason": reason,
-            "level": level,
-            "price": p.get("price", 0),
-            "stock": p.get("stock", 0),
-            "category": p.get("category", "")
+            "product_name": p["name"], "score": score, "reason": reason, "level": level,
+            "price": p.get("price", 0), "stock": p.get("stock", 0), "category": p.get("category", "")
         })
 
     for p in products:
-        if keyword in p["name"]:
-            add_match(p, 100, f"商品名包含「{keyword}」", "L1")
+        if keyword in p["name"]: add_match(p, 100, f"商品名包含「{keyword}」", "L1")
     for p in products:
         if keyword == p.get("category", "") or keyword in p.get("category", ""):
             add_match(p, 80, f"分类为「{p.get('category', '')}」", "L2")
     if len(matches) < req.max_results * 2:
         for p in products:
-            if p["name"] in matched_names:
-                continue
+            if p["name"] in matched_names: continue
             name_chars = set(p["name"])
             common = core_chars & name_chars
             if common and len(common) >= 1:
@@ -1074,8 +1057,7 @@ async def smart_match_products(req: SmartMatchRequest):
             add_match(p, 60, f"标签含「{'/'.join(hit_tags)}」", "L4")
     if len(matches) < req.max_results:
         for p in products:
-            if p["name"] in matched_names:
-                continue
+            if p["name"] in matched_names: continue
             name = p["name"]
             if any(ch in name for ch in keyword):
                 add_match(p, 50, f"名称部分匹配", "L5")
@@ -1083,16 +1065,8 @@ async def smart_match_products(req: SmartMatchRequest):
     matches.sort(key=lambda x: (-x["score"], x["product_name"]))
     matches = matches[:req.max_results]
     has_match = len(matches) > 0
-    add_log("smart_match", {"keyword": keyword},
-            f"匹配 {len(matches)} 个（共 {len(products)} 商品）", True)
-    return {
-        "success": True,
-        "has_match": has_match,
-        "keyword": keyword,
-        "matched": matches,
-        "total_products": len(products),
-        "suggest_create": not has_match
-    }
+    add_log("smart_match", {"keyword": keyword}, f"匹配 {len(matches)} 个（共 {len(products)} 商品）", True)
+    return {"success": True, "has_match": has_match, "keyword": keyword, "matched": matches, "total_products": len(products), "suggest_create": not has_match}
 
 
 class SuggestCategoryRequest(BaseModel):
@@ -1117,11 +1091,7 @@ async def suggest_category(req: SuggestCategoryRequest):
         else:
             continue
         break
-    return {
-        "success": True,
-        "suggested_category": suggested,
-        "all_categories": ["茶叶", "食品", "手工艺", "文创"]
-    }
+    return {"success": True, "suggested_category": suggested, "all_categories": ["茶叶", "食品", "手工艺", "文创"]}
 
 
 # ============================================================
@@ -1147,10 +1117,7 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
     if not api_key:
         return {"success": False, "message": "AGNES_API_KEY 环境变量未设置"}
     body = {
-        "model": "agnes-image-2.5-flash",
-        "prompt": req.prompt,
-        "size": req.size,
-        "ratio": req.ratio,
+        "model": "agnes-image-2.5-flash", "prompt": req.prompt, "size": req.size, "ratio": req.ratio,
         "extra_body": {"response_format": "url"}
     }
     if req.reference_images and len(req.reference_images) > 0:
@@ -1165,8 +1132,7 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
                 json=body
             )
             if r.status_code != 200:
-                err_text = r.text[:500]
-                return {"success": False, "message": f"Agnes 返回 {r.status_code}: {err_text}"}
+                return {"success": False, "message": f"Agnes 返回 {r.status_code}: {r.text[:500]}"}
             data = r.json()
     except Exception as e:
         return {"success": False, "message": f"调用 Agnes 异常：{str(e)}"}
@@ -1182,9 +1148,7 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
     if agnes_url:
         try:
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
-                img_r = await http.get(agnes_url, headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"
-                })
+                img_r = await http.get(agnes_url, headers={"User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"})
                 if img_r.status_code == 200:
                     content = img_r.content
                 else:
@@ -1218,13 +1182,9 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
     if not api_key:
         return {"success": False, "message": "AGNES_API_KEY 环境变量未设置"}
     body = {
-        "model": "agnes-video-2.5-flash",
-        "prompt": req.prompt,
-        "seconds": req.seconds,
+        "model": "agnes-video-2.5-flash", "prompt": req.prompt, "seconds": req.seconds,
         "mode": "reference" if req.reference_images else "text",
-        "size": "720P",
-        "aspect_ratio": req.aspect_ratio,
-        "n": 1
+        "size": "720P", "aspect_ratio": req.aspect_ratio, "n": 1
     }
     if req.reference_images:
         body["images"] = req.reference_images[:5]
@@ -1240,11 +1200,7 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
     for attempt in range(max_create_attempts):
         elapsed = time.time() - start_time
         if elapsed > total_timeout:
-            return {
-                "success": False,
-                "message": f"视频队列持续繁忙，已等待 {int(elapsed)}s。请 5-10 分钟后再试。",
-                "queue_full": True
-            }
+            return {"success": False, "message": f"视频队列持续繁忙，已等待 {int(elapsed)}s。请 5-10 分钟后再试。", "queue_full": True}
         try:
             async with httpx.AsyncClient(timeout=60) as http:
                 r = await http.post(
@@ -1270,12 +1226,7 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
             continue
 
     if not create_data:
-        return {
-            "success": False,
-            "message": f"视频队列持续繁忙，已尝试 {max_create_attempts} 次。请稍后重试。",
-            "queue_full": True,
-            "last_error": last_err_msg[:200]
-        }
+        return {"success": False, "message": f"视频队列持续繁忙，已尝试 {max_create_attempts} 次。请稍后重试。", "queue_full": True, "last_error": last_err_msg[:200]}
 
     video_id = create_data.get("video_id")
     if not video_id:
@@ -1331,7 +1282,7 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
 
 
 # ============================================================
-# 图片/视频代理
+# 代理
 # ============================================================
 class ProxyMediaRequest(BaseModel):
     media_url: str
@@ -1345,9 +1296,7 @@ async def proxy_image(req: ProxyMediaRequest, request: Request):
         return {"success": False, "message": "URL 格式错误"}
     try:
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
-            r = await http.get(req.media_url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"
-            })
+            r = await http.get(req.media_url, headers={"User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"})
             if r.status_code != 200:
                 return {"success": False, "message": f"下载失败：HTTP {r.status_code}"}
             content = r.content
@@ -1380,9 +1329,7 @@ async def proxy_video(req: ProxyMediaRequest, request: Request):
         return {"success": False, "message": "URL 格式错误"}
     try:
         async with httpx.AsyncClient(timeout=180, follow_redirects=True) as http:
-            r = await http.get(req.media_url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"
-            })
+            r = await http.get(req.media_url, headers={"User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"})
             if r.status_code != 200:
                 return {"success": False, "message": f"下载失败：HTTP {r.status_code}"}
             content = r.content
@@ -1447,7 +1394,7 @@ tools = [
 
 
 # ============================================================
-# AI 意图识别（含知识库 + 资产库 + 引用溯源 + 访问统计）
+# AI 意图识别
 # ============================================================
 class ChatRequest(BaseModel):
     text: str
@@ -1474,9 +1421,7 @@ def _build_history_messages(session: Optional[dict], fallback_history: Optional[
         lg = session.get("last_generated")
         if lg:
             system_parts.append("")
-            system_parts.append(
-                f"【最近一次生成】类型：{lg.get('kind')}，主题：{lg.get('theme')}，商品：{lg.get('product_name') or '无'}"
-            )
+            system_parts.append(f"【最近一次生成】类型：{lg.get('kind')}，主题：{lg.get('theme')}，商品：{lg.get('product_name') or '无'}")
         if session.get("last_product"):
             system_parts.append(f"【最近操作的商品】{session['last_product']}")
     msgs.append({"role": "system", "content": "\n".join(system_parts)})
@@ -1518,7 +1463,6 @@ async def parse_intent(req: ChatRequest):
         extra = f"\n【用户当前参考素材】图片 {rc.get('images', 0)} 张，视频关键帧 {rc.get('keyframes', 0)} 张"
         messages[0]["content"] += extra
 
-    # ★ 混合检索知识库
     kb_results = search_knowledge_hybrid(req.text, top_k=3)
     kb_hits_full = []
     if kb_results and messages and messages[0]["role"] == "system":
@@ -1527,14 +1471,10 @@ async def parse_intent(req: ChatRequest):
             item = r["item"]
             kb_ctx += f"{i}. 《{item['title']}》({item.get('category_name', item.get('category', ''))})：{item.get('content', '')[:500]}\n"
             kb_hits_full.append({
-                "id": item["id"],
-                "title": item["title"],
-                "category": item.get("category", ""),
-                "category_name": item.get("category_name", ""),
-                "score": round(r["score"], 3),
-                "match_type": r["match_type"]
+                "id": item["id"], "title": item["title"],
+                "category": item.get("category", ""), "category_name": item.get("category_name", ""),
+                "score": round(r["score"], 3), "match_type": r["match_type"]
             })
-            # 记录命中
             try:
                 record_kb_hit(item["id"])
             except Exception:
@@ -1542,7 +1482,6 @@ async def parse_intent(req: ChatRequest):
         kb_ctx += "如果用户问题与以上资料相关，请优先依据资料回答，不要编造。\n"
         messages[0]["content"] += kb_ctx
 
-    # 检索资产库
     assets_hits = []
     trigger_words = ['图', '视频', '素材', '看看', '发我', '发个', '展示', '什么样', '实拍']
     if any(w in req.text for w in trigger_words):
@@ -1574,30 +1513,17 @@ async def parse_intent(req: ChatRequest):
             except Exception:
                 args = {}
             if session is not None:
-                append_turn(session, "ai", f"[调用 {call.function.name}]",
-                            type=call.function.name, args=args)
+                append_turn(session, "ai", f"[调用 {call.function.name}]", type=call.function.name, args=args)
                 pn = args.get("product_name") or args.get("name")
                 if pn:
                     session["last_product"] = pn
                     _save_sessions(sessions_store)
-            return {
-                "type": call.function.name,
-                "args": args,
-                "session_id": session["id"] if session else None,
-                "kb_hits": kb_hits_full,
-                "assets": assets_hits
-            }
+            return {"type": call.function.name, "args": args, "session_id": session["id"] if session else None, "kb_hits": kb_hits_full, "assets": assets_hits}
         else:
             reply_text = msg.content or ""
             if session is not None:
                 append_turn(session, "ai", reply_text, type="chat")
-            return {
-                "type": "chat",
-                "text": reply_text,
-                "session_id": session["id"] if session else None,
-                "kb_hits": kb_hits_full,
-                "assets": assets_hits
-            }
+            return {"type": "chat", "text": reply_text, "session_id": session["id"] if session else None, "kb_hits": kb_hits_full, "assets": assets_hits}
     except Exception as e:
         return {"type": "error", "text": str(e)}
 
@@ -1621,12 +1547,8 @@ async def remember_generation(req: RememberGenRequest):
         return {"success": False, "message": "缺少 session_id"}
     session = get_or_create_session(req.session_id)
     session["last_generated"] = {
-        "kind": req.kind,
-        "theme": req.theme or "",
-        "product_name": req.product_name or "",
-        "urls": req.urls or [],
-        "videoUrl": req.video_url or "",
-        "posterUrl": req.poster_url or "",
+        "kind": req.kind, "theme": req.theme or "", "product_name": req.product_name or "",
+        "urls": req.urls or [], "videoUrl": req.video_url or "", "posterUrl": req.poster_url or "",
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     _save_sessions(sessions_store)
@@ -1639,15 +1561,7 @@ async def get_session(session_id: str):
     s = sessions_store.get(session_id)
     if not s:
         return {"success": False, "message": "会话不存在或已过期"}
-    return {
-        "success": True,
-        "session": {
-            "id": s["id"],
-            "turns": s["turns"][-20:],
-            "last_generated": s.get("last_generated"),
-            "last_product": s.get("last_product"),
-        }
-    }
+    return {"success": True, "session": {"id": s["id"], "turns": s["turns"][-20:], "last_generated": s.get("last_generated"), "last_product": s.get("last_product")}}
 
 
 @app.post("/api/ai/session/clear")
@@ -1875,18 +1789,10 @@ async def market_analysis(req: MarketAnalysisRequest):
         return {"success": False, "message": "缺少主题"}
     now = datetime.now()
     month = now.month
-    if month in (3, 4, 5):
-        season_hint = "春季"
-        festival_hint = "母亲节/五一"
-    elif month in (6, 7, 8):
-        season_hint = "夏季"
-        festival_hint = "618/端午节/暑期"
-    elif month in (9, 10, 11):
-        season_hint = "秋季"
-        festival_hint = "中秋节/国庆/双11"
-    else:
-        season_hint = "冬季"
-        festival_hint = "双12/圣诞/元旦/年货节"
+    if month in (3, 4, 5): season_hint = "春季"; festival_hint = "母亲节/五一"
+    elif month in (6, 7, 8): season_hint = "夏季"; festival_hint = "618/端午节/暑期"
+    elif month in (9, 10, 11): season_hint = "秋季"; festival_hint = "中秋节/国庆/双11"
+    else: season_hint = "冬季"; festival_hint = "双12/圣诞/元旦/年货节"
     kind_names = {"images": "商品主图", "video": "短视频", "poster": "宣传海报"}
     kind_name = kind_names.get(req.kind, "商品素材")
     prompt = f"""你是资深电商运营专家 + 视觉营销总监。用户想为「{req.theme}」生成{kind_name}。
@@ -1943,10 +1849,117 @@ async def market_analysis(req: MarketAnalysisRequest):
 
 
 # ============================================================
+# ★ AI 智能推荐商品（新增）
+# ============================================================
+class RecommendProductsRequest(BaseModel):
+    text: str
+    max_results: int = 3
+
+
+@app.post("/api/ai/recommend-products")
+async def recommend_products(req: RecommendProductsRequest):
+    """根据客户对话，AI 推荐最匹配的商品"""
+    if not products:
+        return {"success": True, "products": []}
+
+    products_summary = [
+        {"id": p["id"], "name": p["name"], "category": p.get("category", ""),
+         "subcat": p.get("subcat", ""), "tags": p.get("tags", []),
+         "price": p.get("price", 0), "spec": p.get("spec", "")}
+        for p in products
+    ]
+
+    prompt = f"""你是电商客服助手。客户说了以下话，请从商品库中挑选最匹配的商品推荐给客户。
+
+客户说：{req.text}
+
+商品库：
+{json.dumps(products_summary, ensure_ascii=False, indent=2)}
+
+请严格返回 JSON（不要 markdown 代码块）：
+{{
+  "product_ids": [商品ID数组，按匹配度排序，最多 {req.max_results} 个],
+  "reason": "简短说明推荐理由"
+}}
+
+规则：
+- 优先按商品名、分类、标签的语义匹配
+- 如果客户没有明确指向，返回销量最高的前 {req.max_results} 个
+- 如果完全没有相关商品，返回空数组 []
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-flash",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            if len(parts) >= 2:
+                raw = parts[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+        result = json.loads(raw)
+        ids = result.get("product_ids", [])
+        matched = [p for p in products if p["id"] in ids]
+        for p in matched:
+            if not p.get("url"):
+                p["url"] = _build_product_url(p)
+        add_log("recommend_products", {"text": req.text[:50]}, f"推荐 {len(matched)} 个商品", True)
+        return {"success": True, "products": matched, "reason": result.get("reason", "")}
+    except Exception as e:
+        print(f"[recommend_products] 失败: {e}")
+        sorted_products = sorted(products, key=lambda p: p.get("sales", 0), reverse=True)
+        top = sorted_products[:req.max_results]
+        for p in top:
+            if not p.get("url"):
+                p["url"] = _build_product_url(p)
+        return {"success": True, "products": top, "fallback": True}
+
+
+# ============================================================
+# ★ 卡片点击追踪（新增）
+# ============================================================
+class TrackClickRequest(BaseModel):
+    product_id: Optional[int] = None
+    product_name: Optional[str] = ""
+    action: Optional[str] = "view"
+    conv_id: Optional[str] = ""
+    time: Optional[str] = ""
+
+
+@app.post("/api/ai/track-card-click")
+async def track_card_click(req: TrackClickRequest):
+    data = load_card_clicks()
+    data["total_clicked"] = data.get("total_clicked", 0) + 1
+    pid = str(req.product_id) if req.product_id else "unknown"
+    if pid not in data["by_product"]:
+        data["by_product"][pid] = {"name": req.product_name, "shown": 0, "clicked": 0}
+    data["by_product"][pid]["clicked"] = data["by_product"][pid].get("clicked", 0) + 1
+    save_card_clicks(data)
+    add_log("track_card_click", {"product_id": req.product_id, "action": req.action}, "已记录点击", True)
+    return {"success": True}
+
+
+# ============================================================
+# ★ 优惠券（新增）
+# ============================================================
+@app.get("/api/coupons")
+async def get_coupons():
+    return {"coupons": load_coupons()}
+
+
+# ============================================================
 # 商品数据接口
 # ============================================================
 @app.get("/api/products")
 async def get_products():
+    for p in products:
+        if not p.get("url"):
+            p["url"] = _build_product_url(p)
     return {"products": products}
 
 
@@ -2133,7 +2146,7 @@ def do_action(t, args):
         if any(p["name"] == name for p in products): return {"success": False, "message": f"商品「{name}」已存在"}
         new_id = max([p["id"] for p in products], default=0) + 1
         icon_map = {"茶叶": "fa-leaf", "手工艺": "fa-bag-shopping", "食品": "fa-seedling", "文创": "fa-palette"}
-        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box"), "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": spec, "sku": sku, "rating": "", "subcat": "", "third": "", "tags": [], "category_path": []}
+        new_product = {"id": new_id, "name": name, "price": price, "stock": stock, "category": category, "platform": platform, "status": "在售", "sales": 0, "icon": icon_map.get(category, "fa-box"), "main_image": "", "sub_images": [], "video": "", "detail_html": "", "spec": spec, "sku": sku, "rating": "", "subcat": "", "third": "", "tags": [], "category_path": [], "url": "", "original_price": None}
         products.append(new_product)
         save_products(products)
         return {"success": True, "message": f"已新增商品「{name}」：价格 ¥{price}，库存 {stock} 件，分类 {category}，平台 {platform}"}
@@ -2412,8 +2425,7 @@ async def update_product(req: ProductUpdateRequest):
     if not p:
         return {"success": False, "message": f"未找到商品：{req.product_name}"}
     for key, val in req.fields.items():
-        if key in ("id",):
-            continue
+        if key in ("id",): continue
         p[key] = val
     save_products(products)
     add_log("update_product", {"product_name": req.product_name}, f"已更新「{p['name']}」信息", True)
@@ -2437,24 +2449,17 @@ async def create_product(req: ProductCreateRequest):
     icon_map = {"茶叶": "fa-leaf", "手工艺": "fa-bag-shopping", "食品": "fa-seedling", "文创": "fa-palette"}
     new_product = {
         "id": new_id, "name": name,
-        "price": f.get("price", 0),
-        "stock": f.get("stock", 0),
-        "category": f.get("category", "文创"),
-        "platform": f.get("platform", "淘宝"),
-        "status": f.get("status", "在售"),
-        "sales": 0,
+        "price": f.get("price", 0), "stock": f.get("stock", 0),
+        "category": f.get("category", "文创"), "platform": f.get("platform", "淘宝"),
+        "status": f.get("status", "在售"), "sales": 0,
         "icon": icon_map.get(f.get("category", "文创"), "fa-box"),
-        "main_image": f.get("main_image", ""),
-        "sub_images": f.get("sub_images", []),
-        "video": f.get("video", ""),
-        "detail_html": f.get("detail_html", ""),
-        "spec": f.get("spec", ""),
-        "sku": f.get("sku", ""),
-        "rating": f.get("rating", ""),
-        "subcat": f.get("subcat", ""),
-        "third": f.get("third", ""),
-        "tags": f.get("tags", []),
+        "main_image": f.get("main_image", ""), "sub_images": f.get("sub_images", []),
+        "video": f.get("video", ""), "detail_html": f.get("detail_html", ""),
+        "spec": f.get("spec", ""), "sku": f.get("sku", ""),
+        "rating": f.get("rating", ""), "subcat": f.get("subcat", ""),
+        "third": f.get("third", ""), "tags": f.get("tags", []),
         "category_path": f.get("category_path", []),
+        "url": f.get("url", ""), "original_price": f.get("original_price", None),
     }
     products.append(new_product)
     save_products(products)
@@ -2484,7 +2489,7 @@ async def delete_product_api(req: ProductDeleteRequest):
 
 
 # ============================================================
-# 批量同步素材
+# 同步素材
 # ============================================================
 class SyncMaterialRequest(BaseModel):
     product_names: List[str]
@@ -2539,37 +2544,18 @@ async def sync_materials(req: SyncMaterialRequest):
 
 
 # ============================================================
-# 知识库 API（完整版）
+# 知识库 API
 # ============================================================
-def _find_category_name(categories, cat_id):
-    """根据分类 ID 找名字"""
-    for node in categories:
-        if node["id"] == cat_id:
-            return node["name"]
-        if node.get("children"):
-            name = _find_category_name(node["children"], cat_id)
-            if name:
-                return name
-    return cat_id or "未分类"
-
-
 @app.get("/api/kb/list")
 async def kb_list(include_disabled: bool = True):
     meta = _load_kb_meta()
     items = meta.get("items", [])
     if not include_disabled:
         items = [x for x in items if x.get("enabled", True)]
-    # 补充分类名
     categories = meta.get("categories", DEFAULT_KB_CATEGORIES)
     for item in items:
         item["category_name"] = _find_category_name(categories, item.get("category", ""))
-    return {
-        "success": True,
-        "items": items,
-        "categories": categories,
-        "total": len(items),
-        "stats": meta.get("stats", {})
-    }
+    return {"success": True, "items": items, "categories": categories, "total": len(items), "stats": meta.get("stats", {})}
 
 
 @app.get("/api/kb/categories")
@@ -2589,13 +2575,7 @@ async def kb_category_create(req: KBCategoryCreateRequest):
     meta = _load_kb_meta()
     categories = meta.get("categories", DEFAULT_KB_CATEGORIES)
     new_id = f"cat_{uuid.uuid4().hex[:8]}"
-    new_node = {
-        "id": new_id,
-        "name": req.name,
-        "icon": req.icon or "📄",
-        "parent_id": req.parent_id,
-        "children": []
-    }
+    new_node = {"id": new_id, "name": req.name, "icon": req.icon or "📄", "parent_id": req.parent_id, "children": []}
     if not req.parent_id:
         categories.append(new_node)
     else:
@@ -2622,17 +2602,14 @@ class KBCategoryDeleteRequest(BaseModel):
 async def kb_category_delete(req: KBCategoryDeleteRequest):
     meta = _load_kb_meta()
     categories = meta.get("categories", DEFAULT_KB_CATEGORIES)
-
     def remove_node(tree):
         new_tree = []
         for node in tree:
-            if node["id"] == req.id:
-                continue
+            if node["id"] == req.id: continue
             if node.get("children"):
                 node["children"] = remove_node(node["children"])
             new_tree.append(node)
         return new_tree
-
     meta["categories"] = remove_node(categories)
     _save_kb_meta(meta)
     return {"success": True}
@@ -2660,39 +2637,25 @@ async def kb_upload(
     file_path = KB_DIR / "files" / safe_name
     with open(file_path, "wb") as f:
         f.write(content_bytes)
-
     if content_override.strip():
         text_content = content_override
     else:
         text_content = _extract_text_from_file(file_path, ext)
-
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
     categories = meta.get("categories", DEFAULT_KB_CATEGORIES)
     cat_name = _find_category_name(categories, category)
-
     item = {
-        "id": item_id,
-        "title": title,
-        "category": category,
-        "category_name": cat_name,
-        "tags": tag_list,
-        "filename": file.filename,
-        "stored_name": safe_name,
-        "file_size": len(content_bytes),
-        "content_length": len(text_content),
-        "content": text_content[:20000],
-        "enabled": True,
-        "pinned": False,
+        "id": item_id, "title": title, "category": category, "category_name": cat_name,
+        "tags": tag_list, "filename": file.filename, "stored_name": safe_name,
+        "file_size": len(content_bytes), "content_length": len(text_content),
+        "content": text_content[:20000], "enabled": True, "pinned": False,
         "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "uploaded_by": "admin"
     }
     meta["items"].insert(0, item)
     _save_kb_meta(meta)
-
-    # 重建向量索引
     _rebuild_kb_vectors()
-
     add_log("kb_upload", {"title": title}, f"已上传知识：{title}", True)
     return {"success": True, "message": f"已上传知识「{title}」", "item": item}
 
@@ -2704,7 +2667,6 @@ async def kb_batch_upload(
     category: str = Form("cat_other"),
     tags: str = Form("")
 ):
-    """批量上传，标题用文件名"""
     if len(files) > 20:
         return {"success": False, "message": "单次最多 20 个文件"}
     results = []
@@ -2736,25 +2698,20 @@ class KBUpdateRequest(BaseModel):
 
 @app.post("/api/kb/update")
 async def kb_update(req: KBUpdateRequest):
-    """编辑知识"""
     meta = _load_kb_meta()
     item = next((x for x in meta["items"] if x["id"] == req.id), None)
     if not item:
         return {"success": False, "message": "知识不存在"}
-    if req.title is not None:
-        item["title"] = req.title
+    if req.title is not None: item["title"] = req.title
     if req.content is not None:
         item["content"] = req.content[:20000]
         item["content_length"] = len(req.content)
     if req.category is not None:
         item["category"] = req.category
         item["category_name"] = _find_category_name(meta.get("categories", []), req.category)
-    if req.tags is not None:
-        item["tags"] = req.tags
-    if req.enabled is not None:
-        item["enabled"] = req.enabled
-    if req.pinned is not None:
-        item["pinned"] = req.pinned
+    if req.tags is not None: item["tags"] = req.tags
+    if req.enabled is not None: item["enabled"] = req.enabled
+    if req.pinned is not None: item["pinned"] = req.pinned
     item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _save_kb_meta(meta)
     _rebuild_kb_vectors()
@@ -2807,14 +2764,10 @@ async def kb_search(req: dict):
     for r in results:
         item = r["item"]
         slim.append({
-            "id": item["id"],
-            "title": item["title"],
-            "category": item.get("category", ""),
-            "category_name": item.get("category_name", ""),
-            "tags": item.get("tags", []),
-            "summary": item.get("content", "")[:300],
-            "score": round(r["score"], 3),
-            "match_type": r["match_type"]
+            "id": item["id"], "title": item["title"],
+            "category": item.get("category", ""), "category_name": item.get("category_name", ""),
+            "tags": item.get("tags", []), "summary": item.get("content", "")[:300],
+            "score": round(r["score"], 3), "match_type": r["match_type"]
         })
     return {"success": True, "results": slim, "mode": "hybrid"}
 
@@ -2864,26 +2817,20 @@ async def kb_batch_delete(req: KBBatchDeleteRequest):
     return {"success": True, "message": f"已删除 {deleted} 条知识"}
 
 
-# ★ 访问统计
 @app.get("/api/kb/stats")
 async def kb_stats():
     meta = _load_kb_meta()
     stats = meta.get("stats", {})
     items = meta.get("items", [])
-    # 合并 item 信息
     result = []
     for item in items:
         s = stats.get(item["id"], {"hit_count": 0, "last_hit": "", "satisfied": 0, "unsatisfied": 0})
         total_feedback = s.get("satisfied", 0) + s.get("unsatisfied", 0)
         satisfaction_rate = round(s.get("satisfied", 0) / total_feedback * 100, 1) if total_feedback > 0 else None
         result.append({
-            "id": item["id"],
-            "title": item["title"],
-            "category_name": item.get("category_name", ""),
-            "hit_count": s.get("hit_count", 0),
-            "last_hit": s.get("last_hit", ""),
-            "satisfied": s.get("satisfied", 0),
-            "unsatisfied": s.get("unsatisfied", 0),
+            "id": item["id"], "title": item["title"], "category_name": item.get("category_name", ""),
+            "hit_count": s.get("hit_count", 0), "last_hit": s.get("last_hit", ""),
+            "satisfied": s.get("satisfied", 0), "unsatisfied": s.get("unsatisfied", 0),
             "satisfaction_rate": satisfaction_rate
         })
     result.sort(key=lambda x: -x["hit_count"])
@@ -2910,15 +2857,12 @@ class KBAutoGenerateRequest(BaseModel):
 
 @app.post("/api/kb/auto-generate")
 async def kb_auto_generate(req: KBAutoGenerateRequest):
-    """从对话历史中提炼 FAQ"""
     if not req.history and not req.session_id:
         return {"success": False, "message": "请提供对话历史"}
-
     history = req.history or []
     if req.session_id and req.session_id in sessions_store:
         s = sessions_store[req.session_id]
         history = [{"role": t.get("role"), "text": t.get("text", "")} for t in s.get("turns", [])]
-
     if not history:
         return {"success": False, "message": "对话历史为空"}
 
@@ -2957,31 +2901,22 @@ async def kb_auto_generate(req: KBAutoGenerateRequest):
                     raw = raw[4:]
                 raw = raw.strip()
         faqs = json.loads(raw)
-
-        # 自动写入知识库
         meta = _load_kb_meta()
         added = 0
         for faq in faqs:
             q = faq.get("question", "").strip()
             a = faq.get("answer", "").strip()
-            if not q or not a:
-                continue
+            if not q or not a: continue
             item_id = f"kb_{meta['next_id']:04d}"
             meta["next_id"] += 1
             content = f"Q: {q}\nA: {a}"
             item = {
-                "id": item_id,
-                "title": q[:60],
-                "category": req.category or "cat_faq",
+                "id": item_id, "title": q[:60], "category": req.category or "cat_faq",
                 "category_name": _find_category_name(meta.get("categories", []), req.category or "cat_faq"),
                 "tags": faq.get("tags", []) + ["AI自动生成"],
-                "filename": "ai_generated.txt",
-                "stored_name": "",
-                "file_size": len(content.encode("utf-8")),
-                "content_length": len(content),
-                "content": content,
-                "enabled": True,
-                "pinned": False,
+                "filename": "ai_generated.txt", "stored_name": "",
+                "file_size": len(content.encode("utf-8")), "content_length": len(content),
+                "content": content, "enabled": True, "pinned": False,
                 "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "uploaded_by": "ai_auto"
@@ -3004,43 +2939,16 @@ class KBRecommendRequest(BaseModel):
 
 @app.post("/api/kb/recommend")
 async def kb_recommend(req: KBRecommendRequest):
-    """客服打字时推荐相关知识"""
     if not req.text or len(req.text) < 2:
         return {"success": True, "results": []}
     results = search_knowledge_hybrid(req.text, req.top_k)
     slim = [{
-        "id": r["item"]["id"],
-        "title": r["item"]["title"],
+        "id": r["item"]["id"], "title": r["item"]["title"],
         "category_name": r["item"].get("category_name", ""),
         "summary": r["item"].get("content", "")[:150],
         "score": round(r["score"], 3)
     } for r in results]
     return {"success": True, "results": slim}
-
-
-class KBApplyRequest(BaseModel):
-    session_id: str
-    message_id: str
-    item_id: str
-    satisfied: bool
-
-
-@app.post("/api/kb/apply-feedback")
-async def kb_apply_feedback(req: KBApplyRequest):
-    """AI 引用后客户是否满意"""
-    record_kb_feedback(req.item_id, req.satisfied)
-    # 同时记录到会话
-    if req.session_id in sessions_store:
-        s = sessions_store[req.session_id]
-        s.setdefault("feedback", []).append({
-            "message_id": req.message_id,
-            "item_id": req.item_id,
-            "satisfied": req.satisfied,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-        _save_sessions(sessions_store)
-    add_log("kb_feedback", {"item_id": req.item_id, "satisfied": req.satisfied}, "已记录反馈", True)
-    return {"success": True}
 
 
 # ============================================================
@@ -3067,13 +2975,9 @@ async def assets_upload(
 ):
     ext = Path(file.filename or "").suffix.lower()
     if ext in ASSET_IMAGE_EXT:
-        asset_type = "image"
-        max_size = ASSET_IMAGE_MAX
-        sub_dir = "images"
+        asset_type = "image"; max_size = ASSET_IMAGE_MAX; sub_dir = "images"
     elif ext in ASSET_VIDEO_EXT:
-        asset_type = "video"
-        max_size = ASSET_VIDEO_MAX
-        sub_dir = "videos"
+        asset_type = "video"; max_size = ASSET_VIDEO_MAX; sub_dir = "videos"
     else:
         return {"success": False, "message": f"不支持的文件类型：{ext}"}
     content = await file.read()
@@ -3090,15 +2994,9 @@ async def assets_upload(
     public_url = f"{base_url}/assets/{sub_dir}/{safe_name}"
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
     item = {
-        "id": asset_id,
-        "type": asset_type,
-        "name": file.filename or safe_name,
-        "url": public_url,
-        "tags": tag_list,
-        "product_name": product_name,
-        "category": category,
-        "file_size": len(content),
-        "stored_name": safe_name,
+        "id": asset_id, "type": asset_type, "name": file.filename or safe_name,
+        "url": public_url, "tags": tag_list, "product_name": product_name,
+        "category": category, "file_size": len(content), "stored_name": safe_name,
         "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "uploaded_by": "admin"
     }
@@ -3136,6 +3034,30 @@ async def assets_delete(req: AssetDeleteRequest):
     _save_assets_meta(meta)
     add_log("asset_delete", {"id": req.id}, f"已删除资产：{item['name']}", True)
     return {"success": True, "message": f"已删除「{item['name']}」"}
+
+
+class AssetUpdateRequest(BaseModel):
+    id: str
+    name: Optional[str] = None
+    product_name: Optional[str] = None
+    category: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+@app.post("/api/assets/update")
+async def assets_update(req: AssetUpdateRequest):
+    meta = _load_assets_meta()
+    item = next((x for x in meta["items"] if x["id"] == req.id), None)
+    if not item:
+        return {"success": False, "message": "素材不存在"}
+    if req.name is not None: item["name"] = req.name
+    if req.product_name is not None: item["product_name"] = req.product_name
+    if req.category is not None: item["category"] = req.category
+    if req.tags is not None: item["tags"] = req.tags
+    item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _save_assets_meta(meta)
+    add_log("asset_update", {"id": req.id}, f"已更新素材", True)
+    return {"success": True, "message": "已保存", "item": item}
 
 
 # ============================================================
@@ -3181,9 +3103,8 @@ async def upload_temp_file(
         f.write(content)
     temp_meta[file_id] = {
         "id": file_id, "path": str(file_path),
-        "filename": file.filename or stored_name,
-        "content_type": ctype, "size": len(content),
-        "purpose": purpose, "created_at": time.time(),
+        "filename": file.filename or stored_name, "content_type": ctype,
+        "size": len(content), "purpose": purpose, "created_at": time.time(),
         "is_image": is_image, "is_video": is_video
     }
     _save_temp_meta(temp_meta)
@@ -3259,8 +3180,7 @@ async def extract_frames(
                 pos = int(total * i / max(count - 1, 1)) if count > 1 else total // 2
                 cap.set(cv2.CAP_PROP_POS_FRAMES, min(pos, total - 1))
                 ret, frame = cap.read()
-                if not ret:
-                    continue
+                if not ret: continue
                 h, w = frame.shape[:2]
                 if w > 720:
                     new_w = 720
@@ -3353,7 +3273,7 @@ async def decompose_video(req: DecomposeRequest):
 
 
 # ============================================================
-# CSV 导出 & 根路径
+# CSV & 根路径
 # ============================================================
 @app.get("/api/export/csv")
 async def export_csv():
@@ -3370,15 +3290,22 @@ async def root():
     base_url_info = os.getenv("PUBLIC_BASE_URL", "(未设置，使用 request.base_url)")
     kb_meta = _load_kb_meta()
     asset_meta = _load_assets_meta()
+    coupons = load_coupons()
+    clicks = load_card_clicks()
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 5级智能匹配 + 多轮对话 + 向量检索）",
+        "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 商品卡片 + 优惠券 + 点击追踪）",
         "public_base_url": base_url_info,
         "AGNES_API_KEY_length": agnes_key_len,
         "total_products": len(products),
         "total_sessions": len(sessions_store),
         "total_knowledge": len(kb_meta.get("items", [])),
         "total_assets": len(asset_meta.get("items", [])),
+        "total_coupons": len(coupons),
+        "card_clicks": {
+            "total_shown": clicks.get("total_shown", 0),
+            "total_clicked": clicks.get("total_clicked", 0)
+        },
         "features": [
             "Agnes 后端代理",
             "5 级智能商品匹配",
@@ -3390,14 +3317,18 @@ async def root():
             "素材持久化",
             "多轮对话上下文",
             "上次生成结果记忆",
-            "企业知识库（编辑/启用/多级分类/PDF Word/批量导入）",
-            "向量检索（TF-IDF）",
+            "企业知识库",
+            "向量检索",
             "引用溯源",
             "访问统计",
             "AI 自动提炼 FAQ",
-            "客服智能推荐",
-            "引用效果分析",
-            "图片/视频资产库"
+            "图片/视频资产库",
+            "★ 商品链接卡片",
+            "★ 卡片点击追踪",
+            "★ 卡片样式自定义",
+            "★ 多商品卡片轮播",
+            "★ 优惠券卡片",
+            "★ AI 智能选品（DeepSeek）"
         ]
     }
 
