@@ -1,11 +1,24 @@
+# ===== 核心框架 =====
 fastapi
 uvicorn[standard]
+
+# ===== AI / HTTP =====
 openai
 httpx
+
+# ===== 配置管理 =====
 python-dotenv
+
+# ===== 文件上传 =====
 python-multipart
+
+# ===== 数据校验 =====
 pydantic
+
+# ===== 文档解析（知识库） =====
 pdfplumber
 python-docx
+
+# ===== 数值计算 / 向量检索（知识库 TF-IDF / 相似度） =====
 numpy
 scikit-learn
