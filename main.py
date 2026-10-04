@@ -13,6 +13,8 @@ import uuid
 import time
 import asyncio
 import httpx
+import csv
+import re
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -36,7 +38,6 @@ TEMP_FILE_TTL = int(os.getenv("TEMP_FILE_TTL", 3600))
 TEMP_MAX_FILE_SIZE = 20 * 1024 * 1024
 TEMP_ALLOWED_IMAGE = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 TEMP_ALLOWED_VIDEO = {"video/mp4", "video/webm", "video/quicktime"}
-
 TEMP_META_FILE = TEMP_UPLOAD_DIR / "_meta.json"
 
 # ============================================================
@@ -44,28 +45,59 @@ TEMP_META_FILE = TEMP_UPLOAD_DIR / "_meta.json"
 # ============================================================
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads")).resolve()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
 for _sub in ("main", "sub", "video", "detail", "proxy"):
     (UPLOAD_DIR / _sub).mkdir(parents=True, exist_ok=True)
+
+# ============================================================
+# 知识库目录
+# ============================================================
+KB_DIR = Path(os.getenv("KB_DIR", "knowledge_base")).resolve()
+KB_DIR.mkdir(parents=True, exist_ok=True)
+(KB_DIR / "files").mkdir(parents=True, exist_ok=True)
+KB_META_FILE = KB_DIR / "_meta.json"
+KB_ALLOWED_EXT = {".txt", ".md", ".markdown", ".json", ".csv"}
+KB_MAX_FILE_SIZE = 10 * 1024 * 1024
+
+# ============================================================
+# 资产库目录
+# ============================================================
+ASSETS_DIR = Path(os.getenv("ASSETS_DIR", "assets_lib")).resolve()
+ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+(ASSETS_DIR / "images").mkdir(exist_ok=True)
+(ASSETS_DIR / "videos").mkdir(exist_ok=True)
+ASSETS_META_FILE = ASSETS_DIR / "_meta.json"
+ASSET_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+ASSET_VIDEO_EXT = {".mp4", ".webm", ".mov", ".quicktime"}
+ASSET_IMAGE_MAX = 10 * 1024 * 1024
+ASSET_VIDEO_MAX = 100 * 1024 * 1024
+
+# ============================================================
+# 会话存储
+# ============================================================
+SESSIONS_FILE = Path(os.getenv("SESSIONS_FILE", "sessions.json")).resolve()
+SESSION_MAX_TURNS = 12
+SESSION_TTL = 3600 * 6
+SESSION_CLEANUP_INTERVAL = 1800
 
 
 def get_public_base_url(request: Request) -> str:
     env_url = os.getenv("PUBLIC_BASE_URL", "").strip()
     if env_url:
         return env_url.rstrip("/")
-
     forwarded_proto = request.headers.get("x-forwarded-proto", "")
     forwarded_host = request.headers.get("x-forwarded-host", "")
     if forwarded_host:
         proto = forwarded_proto or "https"
         return f"{proto}://{forwarded_host}".rstrip("/")
-
     base = str(request.base_url).rstrip("/")
     if base.startswith("http://") and "localhost" not in base and "127.0.0.1" not in base:
         base = "https://" + base[len("http://"):]
     return base
 
 
+# ============================================================
+# 临时图床元数据
+# ============================================================
 def _load_temp_meta():
     if TEMP_META_FILE.exists():
         try:
@@ -114,14 +146,8 @@ async def _periodic_cleanup():
 
 
 # ============================================================
-# ★★★ 多轮对话会话存储
+# 会话存储
 # ============================================================
-SESSIONS_FILE = Path(os.getenv("SESSIONS_FILE", "sessions.json")).resolve()
-SESSION_MAX_TURNS = 12
-SESSION_TTL = 3600 * 6
-SESSION_CLEANUP_INTERVAL = 1800
-
-
 def _load_sessions():
     if SESSIONS_FILE.exists():
         try:
@@ -194,6 +220,167 @@ def append_turn(session: dict, role: str, text: str, **extra):
     _save_sessions(sessions_store)
 
 
+# ============================================================
+# 知识库元数据
+# ============================================================
+def _load_kb_meta():
+    if KB_META_FILE.exists():
+        try:
+            with open(KB_META_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"items": [], "next_id": 1}
+    return {"items": [], "next_id": 1}
+
+
+def _save_kb_meta(meta):
+    try:
+        with open(KB_META_FILE, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[_save_kb_meta] 失败: {e}")
+
+
+def _extract_text_from_file(file_path: Path, ext: str) -> str:
+    try:
+        if ext in (".txt", ".md", ".markdown"):
+            return file_path.read_text(encoding="utf-8", errors="replace")
+        if ext == ".json":
+            data = json.loads(file_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                lines = []
+                for item in data:
+                    if isinstance(item, dict):
+                        q = item.get("question") or item.get("q") or ""
+                        a = item.get("answer") or item.get("a") or ""
+                        if q or a:
+                            lines.append(f"Q: {q}\nA: {a}")
+                        else:
+                            lines.append(json.dumps(item, ensure_ascii=False))
+                    else:
+                        lines.append(str(item))
+                return "\n\n".join(lines)
+            return json.dumps(data, ensure_ascii=False, indent=2)
+        if ext == ".csv":
+            lines = []
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    lines.append(" | ".join(row))
+            return "\n".join(lines)
+    except Exception as e:
+        print(f"[_extract_text] 失败: {e}")
+        return ""
+    return ""
+
+
+def _tokenize_keyword(text: str):
+    if not text:
+        return set()
+    text = text.lower()
+    tokens = set()
+    en_words = re.findall(r"[a-z0-9]+", text)
+    tokens.update(en_words)
+    chinese_chars = re.findall(r"[\u4e00-\u9fff]", text)
+    for i in range(len(chinese_chars) - 1):
+        tokens.add(chinese_chars[i] + chinese_chars[i + 1])
+    tokens.update(chinese_chars)
+    return tokens
+
+
+def search_knowledge(query: str, top_k: int = 3):
+    if not query:
+        return []
+    meta = _load_kb_meta()
+    items = meta.get("items", [])
+    if not items:
+        return []
+    q_tokens = _tokenize_keyword(query)
+    if not q_tokens:
+        return []
+    scored = []
+    for item in items:
+        content = item.get("content", "")
+        title = item.get("title", "")
+        tags = item.get("tags", [])
+        haystack = (title + " " + content + " " + " ".join(tags)).lower()
+        h_tokens = _tokenize_keyword(haystack)
+        if not h_tokens:
+            continue
+        common = q_tokens & h_tokens
+        if not common:
+            continue
+        score = len(common) / max(len(q_tokens), 1)
+        if any(t in title.lower() for t in q_tokens if len(t) >= 2):
+            score += 0.5
+        for tag in tags:
+            if tag.lower() in query.lower():
+                score += 0.3
+        scored.append((score, item))
+    scored.sort(key=lambda x: -x[0])
+    return [item for _, item in scored[:top_k]]
+
+
+# ============================================================
+# 资产库元数据
+# ============================================================
+def _load_assets_meta():
+    if ASSETS_META_FILE.exists():
+        try:
+            with open(ASSETS_META_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"items": [], "next_id": 1}
+    return {"items": [], "next_id": 1}
+
+
+def _save_assets_meta(meta):
+    try:
+        with open(ASSETS_META_FILE, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[_save_assets_meta] 失败: {e}")
+
+
+def search_assets(query: str, asset_type: str = "all", top_k: int = 6):
+    meta = _load_assets_meta()
+    items = meta.get("items", [])
+    if not items:
+        return []
+    results = []
+    q = (query or "").lower().strip()
+    q_tokens = _tokenize_keyword(q)
+    for item in items:
+        if asset_type != "all" and item.get("type") != asset_type:
+            continue
+        name = item.get("name", "").lower()
+        tags = [t.lower() for t in item.get("tags", [])]
+        product = (item.get("product_name") or "").lower()
+        category = (item.get("category") or "").lower()
+        if not q:
+            results.append((0, item))
+            continue
+        haystack = name + " " + " ".join(tags) + " " + product + " " + category
+        h_tokens = _tokenize_keyword(haystack)
+        common = q_tokens & h_tokens
+        score = len(common)
+        if q in name:
+            score += 3
+        if any(q in t for t in tags):
+            score += 2
+        if q in product:
+            score += 2
+        if q in category:
+            score += 1
+        if score > 0:
+            results.append((score, item))
+    results.sort(key=lambda x: -x[0])
+    return [item for _, item in results[:top_k]]
+
+
+# ============================================================
+# lifespan
+# ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task1 = asyncio.create_task(_periodic_cleanup())
@@ -213,6 +400,7 @@ app.add_middleware(
 )
 
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY", "").strip() or "placeholder-no-key",
@@ -261,7 +449,6 @@ async def debug_agnes():
     api_key = os.getenv("AGNES_API_KEY", "").strip()
     if not api_key:
         return {"success": False, "message": "AGNES_API_KEY 未设置", "key_length": 0}
-
     try:
         async with httpx.AsyncClient(timeout=60) as http:
             r = await http.post(
@@ -538,6 +725,10 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "agnes_generate_image": "后端代调Agnes图片",
         "agnes_generate_video": "后端代调Agnes视频",
         "remember_generation": "记录生成结果",
+        "kb_upload": "上传知识库",
+        "kb_delete": "删除知识库",
+        "asset_upload": "上传资产",
+        "asset_delete": "删除资产",
     }
     logs = load_logs()
     log_entry = {
@@ -594,7 +785,7 @@ def _delete_file_by_url(url: str):
 
 
 # ============================================================
-# 智能匹配商品（5 级匹配）
+# 智能匹配商品（5 级）
 # ============================================================
 class SmartMatchRequest(BaseModel):
     keyword: str
@@ -697,14 +888,12 @@ class SuggestCategoryRequest(BaseModel):
 @app.post("/api/products/suggest-category")
 async def suggest_category(req: SuggestCategoryRequest):
     keyword = req.keyword.strip()
-
     CATEGORY_KEYWORDS = {
         "茶叶": ["茶", "龙井", "碧螺春", "铁观音", "大红袍", "毛尖", "普洱", "红茶", "绿茶", "乌龙"],
         "食品": ["糕", "饼", "糖", "果", "肉", "零食", "坚果", "核桃", "开心果", "巴旦木", "干", "蜜饯", "果脯"],
         "手工艺": ["杯", "瓷", "陶", "竹", "编", "木", "手工", "织", "绣", "雕刻", "壶", "碗"],
         "文创": ["丝巾", "折扇", "书签", "明信片", "文创", "国风", "香薰", "手工皂", "笔", "本", "画"],
     }
-
     suggested = "文创"
     for cat, keywords in CATEGORY_KEYWORDS.items():
         for kw in keywords:
@@ -714,7 +903,6 @@ async def suggest_category(req: SuggestCategoryRequest):
         else:
             continue
         break
-
     return {
         "success": True,
         "suggested_category": suggested,
@@ -723,7 +911,7 @@ async def suggest_category(req: SuggestCategoryRequest):
 
 
 # ============================================================
-# 后端代调 Agnes
+# Agnes 代调
 # ============================================================
 class AgnesImageRequest(BaseModel):
     prompt: str
@@ -849,7 +1037,6 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
                 "message": f"视频队列持续繁忙，已等待 {int(elapsed)}s。请 5-10 分钟后再试。",
                 "queue_full": True
             }
-
         try:
             async with httpx.AsyncClient(timeout=60) as http:
                 r = await http.post(
@@ -951,7 +1138,6 @@ async def proxy_image(req: ProxyMediaRequest, request: Request):
         return {"success": False, "message": "缺少 media_url"}
     if not req.media_url.startswith(("http://", "https://")):
         return {"success": False, "message": "URL 格式错误"}
-
     try:
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as http:
             r = await http.get(req.media_url, headers={
@@ -967,14 +1153,10 @@ async def proxy_image(req: ProxyMediaRequest, request: Request):
     if len(content) > 20 * 1024 * 1024:
         return {"success": False, "message": "图片超过 20MB"}
 
-    if "png" in content_type:
-        ext = ".png"
-    elif "webp" in content_type:
-        ext = ".webp"
-    elif "gif" in content_type:
-        ext = ".gif"
-    else:
-        ext = ".jpg"
+    if "png" in content_type: ext = ".png"
+    elif "webp" in content_type: ext = ".webp"
+    elif "gif" in content_type: ext = ".gif"
+    else: ext = ".jpg"
 
     proxy_dir = UPLOAD_DIR / "proxy"
     proxy_dir.mkdir(parents=True, exist_ok=True)
@@ -995,7 +1177,6 @@ async def proxy_video(req: ProxyMediaRequest, request: Request):
         return {"success": False, "message": "缺少 media_url"}
     if not req.media_url.startswith(("http://", "https://")):
         return {"success": False, "message": "URL 格式错误"}
-
     try:
         async with httpx.AsyncClient(timeout=180, follow_redirects=True) as http:
             r = await http.get(req.media_url, headers={
@@ -1011,12 +1192,9 @@ async def proxy_video(req: ProxyMediaRequest, request: Request):
     if len(content) > 100 * 1024 * 1024:
         return {"success": False, "message": "视频超过 100MB"}
 
-    if "webm" in content_type:
-        ext = ".webm"
-    elif "quicktime" in content_type or "mov" in content_type:
-        ext = ".mov"
-    else:
-        ext = ".mp4"
+    if "webm" in content_type: ext = ".webm"
+    elif "quicktime" in content_type or "mov" in content_type: ext = ".mov"
+    else: ext = ".mp4"
 
     proxy_dir = UPLOAD_DIR / "proxy"
     proxy_dir.mkdir(parents=True, exist_ok=True)
@@ -1072,7 +1250,7 @@ tools = [
 
 
 # ============================================================
-# ★★★ 多轮对话上下文 —— AI 意图识别
+# 多轮上下文 —— AI 意图识别
 # ============================================================
 class ChatRequest(BaseModel):
     text: str
@@ -1080,11 +1258,11 @@ class ChatRequest(BaseModel):
     history: Optional[List[dict]] = None
     last_generated: Optional[dict] = None
     reference_context: Optional[dict] = None
+    conv_id: Optional[str] = None
 
 
 def _build_history_messages(session: Optional[dict], fallback_history: Optional[List[dict]]):
     msgs = []
-
     system_parts = [
         "你是电商运营助手。用户会用自然语言下达指令。",
         "你需要判断应该调用哪个工具，并提取参数。",
@@ -1095,7 +1273,6 @@ def _build_history_messages(session: Optional[dict], fallback_history: Optional[
         "2. 若上文提到某商品，'它''这个''刚才那个'都指该商品。",
         "3. 若用户明确说出新商品名，以新商品为准。",
     ]
-
     if session:
         lg = session.get("last_generated")
         if lg:
@@ -1105,7 +1282,6 @@ def _build_history_messages(session: Optional[dict], fallback_history: Optional[
             )
         if session.get("last_product"):
             system_parts.append(f"【最近操作的商品】{session['last_product']}")
-
     msgs.append({"role": "system", "content": "\n".join(system_parts)})
 
     turns = []
@@ -1124,7 +1300,6 @@ def _build_history_messages(session: Optional[dict], fallback_history: Optional[
             msgs.append({"role": "user", "content": text})
         elif role == "ai":
             msgs.append({"role": "assistant", "content": text[:200]})
-
     return msgs
 
 
@@ -1146,6 +1321,27 @@ async def parse_intent(req: ChatRequest):
         extra = f"\n【用户当前参考素材】图片 {rc.get('images', 0)} 张，视频关键帧 {rc.get('keyframes', 0)} 张"
         messages[0]["content"] += extra
 
+    # 检索知识库
+    kb_hits = search_knowledge(req.text, top_k=3)
+    if kb_hits and messages and messages[0]["role"] == "system":
+        kb_ctx = "\n\n【企业知识库参考资料】\n"
+        for i, kb in enumerate(kb_hits, 1):
+            kb_ctx += f"{i}. 《{kb['title']}》({kb.get('category', '')})：{kb.get('content', '')[:500]}\n"
+        kb_ctx += "如果用户问题与以上资料相关，请优先依据资料回答，不要编造。\n"
+        messages[0]["content"] += kb_ctx
+
+    # 检索资产库
+    assets_hits = []
+    trigger_words = ['图', '视频', '素材', '看看', '发我', '发个', '展示', '什么样', '实拍']
+    if any(w in req.text for w in trigger_words):
+        assets_hits = search_assets(req.text, asset_type="all", top_k=4)
+        if assets_hits and messages and messages[0]["role"] == "system":
+            a_ctx = "\n\n【可用素材库（可推荐给用户）】\n"
+            for a in assets_hits:
+                a_ctx += f"- [{a['type']}] {a['name']} → {a['url']}\n"
+            a_ctx += "如用户要求看图/视频，可从上面挑选匹配的发送，回复末尾附上素材链接。\n"
+            messages[0]["content"] += a_ctx
+
     messages.append({"role": "user", "content": req.text})
 
     try:
@@ -1156,7 +1352,6 @@ async def parse_intent(req: ChatRequest):
             tool_choice="auto"
         )
         msg = response.choices[0].message
-
         if session is not None:
             append_turn(session, "user", req.text)
 
@@ -1177,6 +1372,8 @@ async def parse_intent(req: ChatRequest):
                 "type": call.function.name,
                 "args": args,
                 "session_id": session["id"] if session else None,
+                "kb_hits": [{"id": k["id"], "title": k["title"]} for k in kb_hits],
+                "assets": assets_hits
             }
         else:
             reply_text = msg.content or ""
@@ -1186,13 +1383,15 @@ async def parse_intent(req: ChatRequest):
                 "type": "chat",
                 "text": reply_text,
                 "session_id": session["id"] if session else None,
+                "kb_hits": [{"id": k["id"], "title": k["title"]} for k in kb_hits],
+                "assets": assets_hits
             }
     except Exception as e:
         return {"type": "error", "text": str(e)}
 
 
 # ============================================================
-# ★★★ 记录最近一次生成结果
+# 记录最近一次生成结果
 # ============================================================
 class RememberGenRequest(BaseModel):
     session_id: Optional[str] = None
@@ -1249,7 +1448,7 @@ async def clear_session(payload: dict):
 
 
 # ============================================================
-# ★★★ 生成意图识别（带上下文）
+# 生成意图识别（带上下文）
 # ============================================================
 class ParseGenRequest(BaseModel):
     text: str
@@ -1335,7 +1534,6 @@ async def parse_generation(req: ParseGenRequest):
                 if raw.startswith('json'):
                     raw = raw[4:]
                 raw = raw.strip()
-
         result = json.loads(raw)
         add_log("parse_generation", {"text": text[:50]}, f"kind={result.get('kind')}", True)
         return result
@@ -1345,7 +1543,7 @@ async def parse_generation(req: ParseGenRequest):
 
 
 # ============================================================
-# 商品匹配（旧的，保留兼容）
+# 商品匹配（旧版，保留兼容）
 # ============================================================
 class MatchRequest(BaseModel):
     keywords: List[str]
@@ -1437,10 +1635,8 @@ async def match_products(req: MatchRequest):
                 if raw.startswith("json"):
                     raw = raw[4:]
                 raw = raw.strip()
-
         ai_result = json.loads(raw)
         ai_matches = ai_result.get("matches", [])
-
         valid_names = {p["name"] for p in products}
         for m in ai_matches:
             if m.get("product_name") in valid_names:
@@ -1463,7 +1659,6 @@ async def match_products(req: MatchRequest):
                 p_category = p.get("category", "").lower()
                 p_subcat = p.get("subcat", "").lower()
                 p_tags = [t.lower() for t in p.get("tags", [])]
-
                 hit = False
                 if clean in p_category or clean in p_subcat:
                     hit = True
@@ -1471,7 +1666,6 @@ async def match_products(req: MatchRequest):
                     hit = True
                 if clean in p["name"].lower():
                     hit = True
-
                 if hit:
                     key = (p["name"], "category")
                     if key not in seen:
@@ -1485,7 +1679,6 @@ async def match_products(req: MatchRequest):
 
     matches.sort(key=lambda x: x["score"], reverse=True)
     matches = matches[:5]
-
     add_log("match_products", {"keywords": req.keywords}, f"共匹配 {len(matches)} 个商品", True)
     return {"success": True, "matches": matches}
 
@@ -1567,7 +1760,6 @@ async def market_analysis(req: MarketAnalysisRequest):
                 if raw.startswith("json"):
                     raw = raw[4:]
                 raw = raw.strip()
-
         result = json.loads(raw)
         add_log("market_analysis", {"theme": req.theme, "kind": req.kind}, "深度分析成功", True)
         return {"success": True, "analysis": result}
@@ -2207,14 +2399,12 @@ async def sync_materials(req: SyncMaterialRequest):
         if not p:
             results.append({"name": name, "ok": False, "msg": "未找到商品"})
             continue
-
         try:
             if req.main_image:
                 old = p.get("main_image", "")
                 p["main_image"] = req.main_image
                 if old and old != req.main_image:
                     _delete_file_by_url(old)
-
             if req.sub_images:
                 if req.mode == "replace":
                     for old in p.get("sub_images", []):
@@ -2223,16 +2413,13 @@ async def sync_materials(req: SyncMaterialRequest):
                 else:
                     existing = p.get("sub_images", [])
                     p["sub_images"] = (existing + req.sub_images)[:5]
-
             if req.video:
                 old = p.get("video", "")
                 p["video"] = req.video
                 if old and old != req.video:
                     _delete_file_by_url(old)
-
             if req.detail_html:
                 p["detail_html"] = req.detail_html
-
             results.append({"name": p["name"], "ok": True, "msg": "已同步"})
         except Exception as e:
             results.append({"name": name, "ok": False, "msg": str(e)})
@@ -2256,6 +2443,203 @@ async def sync_materials(req: SyncMaterialRequest):
         "message": f"同步完成：成功 {ok_count} 个，失败 {fail_count} 个",
         "results": results
     }
+
+
+# ============================================================
+# 知识库 API
+# ============================================================
+@app.get("/api/kb/list")
+async def kb_list():
+    meta = _load_kb_meta()
+    return {"success": True, "items": meta.get("items", []), "total": len(meta.get("items", []))}
+
+
+@app.post("/api/kb/upload")
+async def kb_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    category: str = Form("FAQ"),
+    tags: str = Form("")
+):
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in KB_ALLOWED_EXT:
+        return {"success": False, "message": f"不支持的文件类型：{ext}，仅支持 txt/md/json/csv"}
+
+    content_bytes = await file.read()
+    if len(content_bytes) > KB_MAX_FILE_SIZE:
+        return {"success": False, "message": f"文件超过 {KB_MAX_FILE_SIZE // (1024*1024)}MB"}
+
+    meta = _load_kb_meta()
+    item_id = f"kb_{meta['next_id']:04d}"
+    meta["next_id"] += 1
+
+    safe_name = f"{item_id}{ext}"
+    file_path = KB_DIR / "files" / safe_name
+    with open(file_path, "wb") as f:
+        f.write(content_bytes)
+
+    text_content = _extract_text_from_file(file_path, ext)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    item = {
+        "id": item_id,
+        "title": title,
+        "category": category,
+        "tags": tag_list,
+        "filename": file.filename,
+        "stored_name": safe_name,
+        "file_size": len(content_bytes),
+        "content_length": len(text_content),
+        "content": text_content[:8000],
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "uploaded_by": "admin"
+    }
+
+    meta["items"].insert(0, item)
+    _save_kb_meta(meta)
+    add_log("kb_upload", {"title": title}, f"已上传知识：{title}", True)
+
+    return {"success": True, "message": f"已上传知识「{title}」", "item": item}
+
+
+@app.post("/api/kb/search")
+async def kb_search(req: dict):
+    keyword = req.get("keyword", "")
+    top_k = int(req.get("top_k", 3))
+    results = search_knowledge(keyword, top_k)
+    slim = [{
+        "id": r["id"],
+        "title": r["title"],
+        "category": r.get("category", ""),
+        "tags": r.get("tags", []),
+        "summary": r.get("content", "")[:300]
+    } for r in results]
+    return {"success": True, "results": slim}
+
+
+class KBDeleteRequest(BaseModel):
+    id: str
+
+
+@app.post("/api/kb/delete")
+async def kb_delete(req: KBDeleteRequest):
+    meta = _load_kb_meta()
+    item = next((x for x in meta["items"] if x["id"] == req.id), None)
+    if not item:
+        return {"success": False, "message": "知识不存在"}
+    try:
+        (KB_DIR / "files" / item["stored_name"]).unlink(missing_ok=True)
+    except Exception:
+        pass
+    meta["items"] = [x for x in meta["items"] if x["id"] != req.id]
+    _save_kb_meta(meta)
+    add_log("kb_delete", {"id": req.id}, f"已删除知识：{item['title']}", True)
+    return {"success": True, "message": f"已删除「{item['title']}」"}
+
+
+# ============================================================
+# 资产库 API
+# ============================================================
+@app.get("/api/assets/list")
+async def assets_list(asset_type: str = "all", tag: str = ""):
+    meta = _load_assets_meta()
+    items = meta.get("items", [])
+    if asset_type != "all":
+        items = [x for x in items if x.get("type") == asset_type]
+    if tag:
+        items = [x for x in items if tag in (x.get("tags") or [])]
+    return {"success": True, "items": items, "total": len(items)}
+
+
+@app.post("/api/assets/upload")
+async def assets_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    tags: str = Form(""),
+    product_name: str = Form(""),
+    category: str = Form("产品图")
+):
+    ext = Path(file.filename or "").suffix.lower()
+
+    if ext in ASSET_IMAGE_EXT:
+        asset_type = "image"
+        max_size = ASSET_IMAGE_MAX
+        sub_dir = "images"
+    elif ext in ASSET_VIDEO_EXT:
+        asset_type = "video"
+        max_size = ASSET_VIDEO_MAX
+        sub_dir = "videos"
+    else:
+        return {"success": False, "message": f"不支持的文件类型：{ext}"}
+
+    content = await file.read()
+    if len(content) > max_size:
+        return {"success": False, "message": f"文件超过 {max_size // (1024*1024)}MB"}
+
+    meta = _load_assets_meta()
+    asset_id = f"asset_{meta['next_id']:04d}"
+    meta["next_id"] += 1
+
+    safe_name = f"{asset_id}{ext}"
+    file_path = ASSETS_DIR / sub_dir / safe_name
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    base_url = get_public_base_url(request)
+    public_url = f"{base_url}/assets/{sub_dir}/{safe_name}"
+
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    item = {
+        "id": asset_id,
+        "type": asset_type,
+        "name": file.filename or safe_name,
+        "url": public_url,
+        "tags": tag_list,
+        "product_name": product_name,
+        "category": category,
+        "file_size": len(content),
+        "stored_name": safe_name,
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "uploaded_by": "admin"
+    }
+
+    meta["items"].insert(0, item)
+    _save_assets_meta(meta)
+    add_log("asset_upload", {"name": item["name"], "type": asset_type}, f"已上传资产", True)
+
+    return {"success": True, "message": f"已上传「{item['name']}」", "item": item}
+
+
+@app.post("/api/assets/search")
+async def assets_search(req: dict):
+    keyword = req.get("keyword", "")
+    asset_type = req.get("asset_type", "all")
+    top_k = int(req.get("top_k", 6))
+    results = search_assets(keyword, asset_type, top_k)
+    return {"success": True, "results": results}
+
+
+class AssetDeleteRequest(BaseModel):
+    id: str
+
+
+@app.post("/api/assets/delete")
+async def assets_delete(req: AssetDeleteRequest):
+    meta = _load_assets_meta()
+    item = next((x for x in meta["items"] if x["id"] == req.id), None)
+    if not item:
+        return {"success": False, "message": "资产不存在"}
+    sub_dir = "images" if item["type"] == "image" else "videos"
+    try:
+        (ASSETS_DIR / sub_dir / item["stored_name"]).unlink(missing_ok=True)
+    except Exception:
+        pass
+    meta["items"] = [x for x in meta["items"] if x["id"] != req.id]
+    _save_assets_meta(meta)
+    add_log("asset_delete", {"id": req.id}, f"已删除资产：{item['name']}", True)
+    return {"success": True, "message": f"已删除「{item['name']}」"}
 
 
 # ============================================================
@@ -2284,7 +2668,6 @@ async def upload_temp_file(
     purpose: str = Form("reference")
 ):
     _cleanup_expired()
-
     content = await file.read()
     if len(content) > TEMP_MAX_FILE_SIZE:
         return {"success": False, "message": f"文件不能超过 {TEMP_MAX_FILE_SIZE // (1024*1024)}MB"}
@@ -2529,7 +2912,6 @@ async def decompose_video(req: DecomposeRequest):
                 max_tokens=800
             )
             raw = response.choices[0].message.content.strip()
-
             if raw.startswith("```"):
                 parts = raw.split("```")
                 if len(parts) >= 2:
@@ -2537,7 +2919,6 @@ async def decompose_video(req: DecomposeRequest):
                     if raw.startswith("json"):
                         raw = raw[4:]
                     raw = raw.strip()
-
             try:
                 result = json.loads(raw)
             except json.JSONDecodeError:
@@ -2548,18 +2929,14 @@ async def decompose_video(req: DecomposeRequest):
                     "prompt": raw,
                     "style_tags": []
                 }
-
-            add_log("decompose_video", {"count": len(req.keyframe_urls), "model": model_name},
-                    f"反解成功", True)
+            add_log("decompose_video", {"count": len(req.keyframe_urls), "model": model_name}, f"反解成功", True)
             return {"success": True, "analysis": result, "model": model_name}
-
         except Exception as e:
             last_err = str(e)
             print(f"[decompose] model {model_name} 失败: {e}")
             continue
 
-    add_log("decompose_video", {"count": len(req.keyframe_urls)},
-            f"反解失败：{last_err}", False)
+    add_log("decompose_video", {"count": len(req.keyframe_urls)}, f"反解失败：{last_err}", False)
     return {"success": False, "message": f"反解失败：{last_err}"}
 
 
@@ -2583,13 +2960,17 @@ async def export_csv():
 async def root():
     agnes_key_len = len(os.getenv("AGNES_API_KEY", "").strip())
     base_url_info = os.getenv("PUBLIC_BASE_URL", "(未设置，使用 request.base_url)")
+    kb_meta = _load_kb_meta()
+    asset_meta = _load_assets_meta()
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含 5 级智能匹配 + 视频队列自动重试 + 多轮对话上下文）",
+        "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 5级智能匹配 + 多轮对话）",
         "public_base_url": base_url_info,
         "AGNES_API_KEY_length": agnes_key_len,
         "total_products": len(products),
         "total_sessions": len(sessions_store),
+        "total_knowledge": len(kb_meta.get("items", [])),
+        "total_assets": len(asset_meta.get("items", [])),
         "features": [
             "Agnes 后端代理",
             "5 级智能商品匹配",
@@ -2600,7 +2981,9 @@ async def root():
             "视频反解",
             "素材持久化",
             "多轮对话上下文",
-            "上次生成结果记忆"
+            "上次生成结果记忆",
+            "企业知识库",
+            "图片/视频资产库"
         ]
     }
 
