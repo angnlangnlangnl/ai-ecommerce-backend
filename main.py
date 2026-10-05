@@ -967,6 +967,8 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "asset_delete": "删除资产",
         "track_card_click": "卡片点击追踪",
         "recommend_products": "AI推荐商品",
+        "analyze_image": "AI识别图片内容",
+        "auto_replace_from_images": "一键识别并替换",
     }
     logs = load_logs()
     log_entry = {
@@ -3264,6 +3266,20 @@ async def decompose_video(req: DecomposeRequest):
 }"""
     user_content = [{"type": "text", "text": f"目标商品：{req.product_name or '未指定'}\n请分析以下 {len(req.keyframe_urls)} 张关键帧："}]
     for url in req.keyframe_urls[:5]:
+        # ★ 同样主动下载转 base64
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as http:
+                r = await http.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code == 200 and len(r.content) > 100:
+                    b64 = base64.b64encode(r.content).decode()
+                    ctype = r.headers.get("content-type", "image/jpeg").split(";")[0]
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{ctype};base64,{b64}"}
+                    })
+                    continue
+        except Exception as e:
+            print(f"[decompose_video] 下载关键帧失败: {e}")
         user_content.append({"type": "image_url", "image_url": {"url": url}})
     multimodal_models = [os.getenv("AGNES_VL_MODEL", "agnes-vl-2.0"), "agnes-3.0-flash"]
     last_err = None
@@ -3272,7 +3288,7 @@ async def decompose_video(req: DecomposeRequest):
             response = agnes_client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_content}],
-                temperature=0.3, max_tokens=800
+                temperature=0.3, max_tokens=800, timeout=25
             )
             raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
@@ -3296,7 +3312,7 @@ async def decompose_video(req: DecomposeRequest):
 
 
 # ============================================================
-# ★ AI 看图识内容
+# ★ AI 看图识内容（base64 修复版）
 # ============================================================
 class AnalyzeImageRequest(BaseModel):
     image_urls: List[str]
@@ -3308,14 +3324,31 @@ class AnalyzeImageRequest(BaseModel):
 async def analyze_image(req: AnalyzeImageRequest):
     """
     用 Agnes 多模态模型识别图片内容
-    支持：商品识别、文字读取、风格分析、槽位建议
+    ★ 关键修复：后端主动下载图片转 base64，避免 Agnes 访问不到临时图床
     """
     if not req.image_urls or len(req.image_urls) == 0:
         return {"success": False, "message": "缺少图片"}
 
-    # 组织多模态消息
+    # 组织多模态消息（主动下载图片转 base64）
     user_content = [{"type": "text", "text": req.question}]
     for url in req.image_urls[:5]:
+        # ★ 主动下载图片转 base64
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as http:
+                r = await http.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"})
+                if r.status_code == 200 and len(r.content) > 100:
+                    b64 = base64.b64encode(r.content).decode()
+                    ctype = r.headers.get("content-type", "image/jpeg").split(";")[0]
+                    data_url = f"data:{ctype};base64,{b64}"
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": data_url}
+                    })
+                    print(f"[analyze_image] 已下载图片转 base64: {url[:80]}... ({len(r.content)} bytes)")
+                    continue
+        except Exception as e:
+            print(f"[analyze_image] 下载图片失败 {url[:80]}...: {e}")
+        # 兜底：直接传原 URL（比如公网图片）
         user_content.append({
             "type": "image_url",
             "image_url": {"url": url}
@@ -3354,7 +3387,8 @@ async def analyze_image(req: AnalyzeImageRequest):
                     {"role": "user", "content": user_content}
                 ],
                 temperature=0.3,
-                max_tokens=800
+                max_tokens=800,
+                timeout=25  # ★ 25秒超时，避免 Railway 30秒掐断
             )
             text = response.choices[0].message.content.strip()
             add_log("analyze_image", {"count": len(req.image_urls), "model": model_name},
@@ -3373,7 +3407,7 @@ async def analyze_image(req: AnalyzeImageRequest):
 async def auto_replace_from_images(req: dict):
     """
     全自动链路：图片 → AI 识别 → 商品匹配 → 执行替换
-    输入：{ image_urls: [...], hint: "可选，用户提供的商品名提示" }
+    ★ 关键修复：后端主动下载图片转 base64
     """
     image_urls = req.get("image_urls") or []
     hint = (req.get("hint") or "").strip()
@@ -3388,6 +3422,21 @@ async def auto_replace_from_images(req: dict):
 
     user_content = [{"type": "text", "text": ask}]
     for url in image_urls[:5]:
+        # ★ 主动下载图片转 base64
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as http:
+                r = await http.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"})
+                if r.status_code == 200 and len(r.content) > 100:
+                    b64 = base64.b64encode(r.content).decode()
+                    ctype = r.headers.get("content-type", "image/jpeg").split(";")[0]
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{ctype};base64,{b64}"}
+                    })
+                    print(f"[auto_replace] 已下载图片转 base64: {url[:80]}... ({len(r.content)} bytes)")
+                    continue
+        except Exception as e:
+            print(f"[auto_replace] 下载图片失败: {e}")
         user_content.append({"type": "image_url", "image_url": {"url": url}})
 
     system_prompt = (
@@ -3416,7 +3465,8 @@ async def auto_replace_from_images(req: dict):
                     {"role": "user", "content": user_content}
                 ],
                 temperature=0.1,
-                max_tokens=400
+                max_tokens=400,
+                timeout=25  # ★ 25秒超时
             )
             raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
@@ -3516,6 +3566,7 @@ async def auto_replace_from_images(req: dict):
         "sync_payload": payload,
     }
 
+
 # ============================================================
 # CSV & 根路径
 # ============================================================
@@ -3575,6 +3626,8 @@ async def root():
             "优惠券卡片",
             "AI 智能选品（DeepSeek）",
             "★ 销售型 AI 客服（状态机 + 知识库 + 推荐 + 成交学习）",
+            "★ AI 看图识内容（base64 中转）",
+            "★ 一键识别并替换",
         ]
     }
 
