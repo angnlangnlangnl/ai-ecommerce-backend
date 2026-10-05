@@ -947,6 +947,7 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "upload_temp": "上传临时文件",
         "extract_frames": "视频抽帧",
         "decompose_video": "视频反解",
+        "decompose_and_match": "视频反解并匹配商品",
         "parse_generation": "AI 意图识别",
         "match_products": "商品智能匹配",
         "smart_match": "智能匹配商品",
@@ -2530,6 +2531,21 @@ async def sync_materials(req: SyncMaterialRequest):
     global products
     if not req.product_names:
         return {"success": False, "all_ok": False, "message": "请至少选择一个商品"}
+
+    # ★ 兜底：拒绝 blob: 开头的 URL（前端浏览器本地对象，后端无法访问）
+    def _is_blob(u):
+        return isinstance(u, str) and u.startswith("blob:")
+
+    if _is_blob(req.video):
+        return {"success": False, "all_ok": False,
+                "message": "视频 URL 是浏览器本地 blob，未上传服务器。请先上传视频到临时图床再替换。"}
+    if req.main_image and _is_blob(req.main_image):
+        return {"success": False, "all_ok": False,
+                "message": "主图 URL 是浏览器本地 blob，未上传服务器。"}
+    if req.sub_images and any(_is_blob(u) for u in req.sub_images):
+        return {"success": False, "all_ok": False,
+                "message": "副图中存在 blob URL，未上传服务器。"}
+
     results = []
     for name in req.product_names:
         p = find_product(name)
@@ -3266,7 +3282,6 @@ async def decompose_video(req: DecomposeRequest):
 }"""
     user_content = [{"type": "text", "text": f"目标商品：{req.product_name or '未指定'}\n请分析以下 {len(req.keyframe_urls)} 张关键帧："}]
     for url in req.keyframe_urls[:5]:
-        # ★ 同样主动下载转 base64
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as http:
                 r = await http.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -3312,6 +3327,127 @@ async def decompose_video(req: DecomposeRequest):
 
 
 # ============================================================
+# ★ 新增：视频反解 + 自动匹配商品（一步到位）
+# ============================================================
+class DecomposeAndMatchRequest(BaseModel):
+    keyframe_urls: List[str]
+    hint: Optional[str] = ""
+
+
+@app.post("/api/video/decompose-and-match")
+async def decompose_and_match(req: DecomposeAndMatchRequest):
+    """
+    视频关键帧 → AI 反解视频内容 → 提取关键词 → 智能匹配商品
+    给前端"上传视频 + 说替换到商品视频（未指定商品名）"用
+    """
+    if not req.keyframe_urls:
+        return {"success": False, "message": "请至少提供 1 张关键帧"}
+
+    # 1. 调 decompose_video 反解
+    decomp_resp = await decompose_video(DecomposeRequest(
+        keyframe_urls=req.keyframe_urls,
+        product_name=req.hint or ""
+    ))
+    if not decomp_resp.get("success"):
+        add_log("decompose_and_match", {"count": len(req.keyframe_urls)},
+                f"反解失败：{decomp_resp.get('message', '')}", False)
+        return decomp_resp
+
+    analysis = decomp_resp.get("analysis") or {}
+    content = (analysis.get("content") or "").strip()
+    prompt = (analysis.get("prompt") or "").strip()
+    style_tags = analysis.get("style_tags") or []
+
+    # 2. 提取商品关键词
+    keyword = ""
+    if req.hint:
+        keyword = req.hint.strip()
+
+    if not keyword and content:
+        # 取第一句，剥离常见视频描述前缀
+        s = content
+        s = re.sub(r'^(视频[中里]?[画面展示]*|画面[中里]?[展示]*|镜头[中里]?|短片[中里]?|开场[是]?|特写[是]?)[：:，,\s]*', '', s)
+        s = re.sub(r'^(展示|呈现|出现|看到|拍摄|捕捉)[了]?[：:，,\s]*', '', s)
+        first_sentence = re.split(r'[。！!？?\n，,；;]', s)[0].strip()
+        if 2 <= len(first_sentence) <= 20:
+            keyword = first_sentence.replace("（", "").replace("）", "").replace("(", "").replace(")", "").strip()
+        if not keyword:
+            keyword = first_sentence[:20] if first_sentence else ""
+
+    if not keyword and style_tags:
+        keyword = style_tags[0]
+
+    if not keyword:
+        add_log("decompose_and_match", {"count": len(req.keyframe_urls)},
+                "未能提取关键词", False)
+        return {
+            "success": False,
+            "message": "未能从视频中提取出商品关键词",
+            "analysis": analysis
+        }
+
+    # 3. 智能匹配商品（复用 L1~L5 逻辑）
+    def extract_core_chars(kw):
+        stopwords = {'的', '了', '是', '在', '和', '与', '或', '及', '等', '个', '款', '种'}
+        return {ch for ch in kw if '\u4e00' <= ch <= '\u9fff' and ch not in stopwords}
+
+    core_chars = extract_core_chars(keyword)
+    matched_names = set()
+    matches = []
+
+    def add_match(p, score, reason, level):
+        if p["name"] in matched_names: return
+        matched_names.add(p["name"])
+        matches.append({
+            "product_name": p["name"], "score": score, "reason": reason, "level": level,
+            "price": p.get("price", 0), "stock": p.get("stock", 0), "category": p.get("category", "")
+        })
+
+    for p in products:
+        if keyword in p["name"]:
+            add_match(p, 100, f"商品名包含「{keyword}」", "L1")
+    for p in products:
+        if keyword == p.get("category", "") or keyword in p.get("category", ""):
+            add_match(p, 80, f"分类为「{p.get('category', '')}」", "L2")
+    for p in products:
+        if p["name"] in matched_names: continue
+        name_chars = set(p["name"])
+        common = core_chars & name_chars
+        if common:
+            score = 70 if len(common) >= 2 else 65
+            add_match(p, score, f"包含核心字「{''.join(common)}」", "L2.5")
+    for p in products:
+        subcat = p.get("subcat", "")
+        if subcat and (keyword in subcat or subcat in keyword):
+            add_match(p, 65, f"子分类为「{subcat}」", "L3")
+    for p in products:
+        tags = p.get("tags", [])
+        if any(keyword in t or t in keyword for t in tags):
+            hit_tags = [t for t in tags if keyword in t or t in keyword]
+            add_match(p, 60, f"标签含「{'/'.join(hit_tags)}」", "L4")
+    if not matches:
+        for p in products:
+            if any(ch in p["name"] for ch in keyword):
+                add_match(p, 50, "名称部分匹配", "L5")
+
+    matches.sort(key=lambda x: (-x["score"], x["product_name"]))
+    matches = matches[:5]
+
+    add_log("decompose_and_match",
+            {"count": len(req.keyframe_urls), "keyword": keyword},
+            f"匹配 {len(matches)} 个商品", True)
+
+    return {
+        "success": True,
+        "analysis": analysis,
+        "keyword": keyword,
+        "has_match": len(matches) > 0,
+        "matched": matches,
+        "total_products": len(products)
+    }
+
+
+# ============================================================
 # ★ AI 看图识内容（base64 修复版）
 # ============================================================
 class AnalyzeImageRequest(BaseModel):
@@ -3329,10 +3465,8 @@ async def analyze_image(req: AnalyzeImageRequest):
     if not req.image_urls or len(req.image_urls) == 0:
         return {"success": False, "message": "缺少图片"}
 
-    # 组织多模态消息（主动下载图片转 base64）
     user_content = [{"type": "text", "text": req.question}]
     for url in req.image_urls[:5]:
-        # ★ 主动下载图片转 base64
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as http:
                 r = await http.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"})
@@ -3348,7 +3482,6 @@ async def analyze_image(req: AnalyzeImageRequest):
                     continue
         except Exception as e:
             print(f"[analyze_image] 下载图片失败 {url[:80]}...: {e}")
-        # 兜底：直接传原 URL（比如公网图片）
         user_content.append({
             "type": "image_url",
             "image_url": {"url": url}
@@ -3363,13 +3496,11 @@ async def analyze_image(req: AnalyzeImageRequest):
         "4. 如果是多张图，按顺序分别说明"
     )
 
-    # 多模型依次尝试（Agnes 多模态）
     multimodal_models = [
         os.getenv("AGNES_VL_MODEL", "agnes-vl-2.0"),
         "agnes-3.0-flash",
         "agnes-vl-2.0",
     ]
-    # 去重保序
     seen = set()
     models = []
     for m in multimodal_models:
@@ -3388,7 +3519,7 @@ async def analyze_image(req: AnalyzeImageRequest):
                 ],
                 temperature=0.3,
                 max_tokens=800,
-                timeout=25  # ★ 25秒超时，避免 Railway 30秒掐断
+                timeout=25
             )
             text = response.choices[0].message.content.strip()
             add_log("analyze_image", {"count": len(req.image_urls), "model": model_name},
@@ -3415,14 +3546,12 @@ async def auto_replace_from_images(req: dict):
     if not image_urls:
         return {"success": False, "message": "缺少图片"}
 
-    # 1. AI 识别图片
     ask = "请用简洁中文回答：这些图片是什么商品？适合作为商品图的哪个位置（主图/副图/详情图）？"
     if hint:
         ask += f"（用户提示：可能是「{hint}」相关商品）"
 
     user_content = [{"type": "text", "text": ask}]
     for url in image_urls[:5]:
-        # ★ 主动下载图片转 base64
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as http:
                 r = await http.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; AI-Ecommerce-Bot/1.0)"})
@@ -3466,7 +3595,7 @@ async def auto_replace_from_images(req: dict):
                 ],
                 temperature=0.1,
                 max_tokens=400,
-                timeout=25  # ★ 25秒超时
+                timeout=25
             )
             raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
@@ -3496,11 +3625,9 @@ async def auto_replace_from_images(req: dict):
             "recognized": recognized
         }
 
-    # 2. 商品匹配（多级尝试）
     matched_product = None
     match_by = ""
 
-    # 2a. 精确 / 包含
     clean = product_name.replace(" ", "").lower()
     for p in products:
         pn = p["name"].replace(" ", "").lower()
@@ -3512,7 +3639,6 @@ async def auto_replace_from_images(req: dict):
             if pn in clean or clean in pn:
                 matched_product = p; match_by = "contains"; break
 
-    # 2b. 别名
     if not matched_product:
         aliases = {
             "茶叶": "茶叶", "茶": "茶", "礼盒": "礼盒", "竹编": "竹编", "核桃": "核桃",
@@ -3534,7 +3660,6 @@ async def auto_replace_from_images(req: dict):
             "recognized": recognized
         }
 
-    # 3. 组装 sync payload
     slot = recognized.get("suggested_slot") or "main_image"
     payload = {"product_names": [matched_product["name"]], "mode": "replace"}
     if slot == "main_image":
@@ -3589,7 +3714,7 @@ async def root():
     clicks = load_card_clicks()
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 商品卡片 + 优惠券 + 点击追踪 + 销售型 AI 客服）",
+        "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 商品卡片 + 优惠券 + 点击追踪 + 销售型 AI 客服 + 视频反解匹配）",
         "public_base_url": base_url_info,
         "AGNES_API_KEY_length": agnes_key_len,
         "sales_agent_available": SALES_AGENT_AVAILABLE,
@@ -3610,6 +3735,7 @@ async def root():
             "AI 电商策略分析",
             "临时图床",
             "视频反解",
+            "★ 视频反解并匹配商品",
             "素材持久化",
             "多轮对话上下文",
             "上次生成结果记忆",
@@ -3628,6 +3754,7 @@ async def root():
             "★ 销售型 AI 客服（状态机 + 知识库 + 推荐 + 成交学习）",
             "★ AI 看图识内容（base64 中转）",
             "★ 一键识别并替换",
+            "★ blob 兜底拒绝",
         ]
     }
 
