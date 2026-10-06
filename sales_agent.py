@@ -896,6 +896,17 @@ def transition(sess: dict, user_text: str, intent: str) -> str:
     if cur == DialogStage.FAREWELL.value:
         return cur
     if cur == DialogStage.THANK_YOU.value:
+        # ★ 修复死锁：感谢阶段若用户又有新需求，放行到对应状态
+        if any(k in t for k in AFTER_SALES_KEYWORDS):
+            return DialogStage.AFTER_SALES.value
+        if any(k in t for k in ["什么时候", "多久", "发货", "物流", "快递", "几天到"]):
+            return DialogStage.ANSWERING.value
+        if any(k in t for k in ["太贵", "便宜点", "优惠", "折扣", "别家", "再看看", "对比", "有点贵", "能少点"]):
+            return DialogStage.OBJECTION.value
+        if any(k in t for k in ["想要", "想买", "推荐", "有什么", "哪款", "多少钱",
+                                 "价格", "看看", "帮我选", "适合", "有没有", "买"]):
+            return DialogStage.RECOMMENDING.value
+        # 没有新意图 → 保持感谢
         return cur
 
     # 售后优先
