@@ -3759,6 +3759,311 @@ async def root():
     }
 
 
+# ============================================================
+# ★ AI 客服 · 客户信息面板接口
+# ============================================================
+CUSTOMER_FILE = Path(os.getenv("CUSTOMER_FILE", "customers.json")).resolve()
+NOTE_FILE = Path(os.getenv("NOTE_FILE", "sales_notes.json")).resolve()
+BEHAVIOR_DIR = Path(os.getenv("BEHAVIOR_DIR", "data/customer_behaviors")).resolve()
+BEHAVIOR_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_customers():
+    if CUSTOMER_FILE.exists():
+        try:
+            with open(CUSTOMER_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_customers(data):
+    try:
+        with open(CUSTOMER_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[_save_customers] 失败: {e}")
+
+
+def _load_notes():
+    if NOTE_FILE.exists():
+        try:
+            with open(NOTE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_notes(data):
+    try:
+        with open(NOTE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[_save_notes] 失败: {e}")
+
+
+def _load_behavior(customer_id: str) -> dict:
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in customer_id)
+    path = BEHAVIOR_DIR / f"{safe}.json"
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"recent_views": [], "recent_searches": [], "cart_items": [], "last_active": ""}
+
+
+def _build_customer_profile(customer_id: str) -> dict:
+    """
+    综合 customers.json + behavior + 销售会话 生成客户画像
+    """
+    customers = _load_customers()
+    c = customers.get(customer_id, {})
+
+    behavior = _load_behavior(customer_id)
+
+    # 会员等级判断
+    total_spent = float(c.get("total_spent", 0) or 0)
+    order_count = int(c.get("order_count", 0) or 0)
+    last_order_days = c.get("last_order_days", None)
+
+    if total_spent >= 5000 or order_count >= 20:
+        level = "vip"
+        level_name = "VIP 会员"
+        level_color = "#b51a3f"
+    elif total_spent >= 1000 or order_count >= 5:
+        level = "gold"
+        level_name = "黄金会员"
+        level_color = "#b57a00"
+    elif total_spent >= 200 or order_count >= 1:
+        level = "silver"
+        level_name = "白银会员"
+        level_color = "#5f7d95"
+    else:
+        level = "normal"
+        level_name = "普通会员"
+        level_color = "#94a3b8"
+
+    # 客户类型（新客/老客）
+    is_repeat = order_count > 0 or c.get("is_repeat", False)
+    customer_type = "returning" if is_repeat else "new"
+
+    # 价值标签
+    value_tags = []
+    if total_spent >= 1000:
+        value_tags.append({"id": "high_value", "name": "🏅 高价值", "color": "#b51a3f"})
+    if order_count >= 3:
+        value_tags.append({"id": "repeat", "name": "🔁 活跃复购", "color": "#0d7c4f"})
+    if last_order_days is not None and last_order_days > 90:
+        value_tags.append({"id": "sleeping", "name": "💤 沉睡客户", "color": "#5f7d95"})
+    if c.get("coupon_sensitive", False):
+        value_tags.append({"id": "coupon", "name": "🎟️ 优惠敏感", "color": "#b55a1a"})
+    if c.get("has_complaint", False):
+        value_tags.append({"id": "risk", "name": "⚠️ 需关注", "color": "#b51a3f"})
+    if not value_tags:
+        value_tags.append({"id": "normal", "name": "🆕 新客", "color": "#2a7faa"})
+
+    return {
+        "customer_id": customer_id,
+        "name": c.get("name", ""),
+        "avatar_text": c.get("avatar_text", ""),
+        "avatar_color": c.get("avatar_color", "#4dabf7"),
+        "platform": c.get("platform", ""),
+        "online": c.get("online", True),
+        "level": level,
+        "level_name": level_name,
+        "level_color": level_color,
+        "customer_type": customer_type,
+        "is_repeat": is_repeat,
+        "order_count": order_count,
+        "total_spent": total_spent,
+        "last_order_days": last_order_days,
+        "last_order_time": c.get("last_order_time", ""),
+        "register_days": c.get("register_days", None),
+        "value_tags": value_tags,
+        "recent_views": behavior.get("recent_views", [])[:5],
+        "recent_searches": behavior.get("recent_searches", [])[:5],
+        "cart_items": behavior.get("cart_items", [])[:5],
+        "last_active": behavior.get("last_active", ""),
+    }
+
+
+@app.get("/api/customers/{customer_id}")
+async def get_customer_profile(customer_id: str):
+    """获取客户画像（右侧面板用）"""
+    profile = _build_customer_profile(customer_id)
+    return {"success": True, "profile": profile}
+
+
+class CustomerUpsertRequest(BaseModel):
+    customer_id: str
+    fields: dict
+
+
+@app.post("/api/customers/upsert")
+async def upsert_customer(req: CustomerUpsertRequest):
+    """新增/更新客户基础信息（后台同步、测试用）"""
+    customers = _load_customers()
+    c = customers.get(req.customer_id, {})
+    c.update(req.fields or {})
+    customers[req.customer_id] = c
+    _save_customers(customers)
+    return {"success": True, "customer": c}
+
+
+@app.post("/api/customers/track-behavior")
+async def track_customer_behavior(req: dict):
+    """
+    记录客户行为：浏览 / 搜索 / 加购
+    body: { customer_id, action, data }
+    action: view | search | cart | order
+    """
+    customer_id = req.get("customer_id")
+    action = req.get("action", "")
+    data = req.get("data", {}) or {}
+
+    if not customer_id or not action:
+        return {"success": False, "message": "缺少参数"}
+
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in customer_id)
+    path = BEHAVIOR_DIR / f"{safe}.json"
+    behavior = _load_behavior(customer_id)
+
+    if action == "view":
+        item = {
+            "product_id": data.get("product_id"),
+            "product_name": data.get("product_name", ""),
+            "price": data.get("price", 0),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        behavior["recent_views"] = ([item] + behavior.get("recent_views", []))[:10]
+    elif action == "search":
+        kw = (data.get("keyword") or "").strip()
+        if kw:
+            behavior["recent_searches"] = ([kw] + behavior.get("recent_searches", []))[:10]
+    elif action == "cart":
+        item = {
+            "product_id": data.get("product_id"),
+            "product_name": data.get("product_name", ""),
+            "price": data.get("price", 0),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        behavior["cart_items"] = ([item] + behavior.get("cart_items", []))[:10]
+    elif action == "order":
+        customers = _load_customers()
+        c = customers.get(customer_id, {})
+        c["order_count"] = int(c.get("order_count", 0) or 0) + 1
+        c["total_spent"] = float(c.get("total_spent", 0) or 0) + float(data.get("amount", 0) or 0)
+        c["last_order_days"] = 0
+        c["last_order_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c["is_repeat"] = True
+        customers[customer_id] = c
+        _save_customers(customers)
+        behavior["cart_items"] = []
+
+    behavior["last_active"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(behavior, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[track-behavior] 保存失败: {e}")
+
+    return {"success": True}
+
+
+# ============================================================
+# ★ 客服备注接口
+# ============================================================
+class SalesNoteRequest(BaseModel):
+    customer_id: str
+    note: Optional[str] = None
+    add_tag: Optional[str] = None
+    remove_tag: Optional[str] = None
+
+
+@app.get("/api/sales/note/{customer_id}")
+async def get_sales_note(customer_id: str):
+    notes = _load_notes()
+    item = notes.get(customer_id, {"note": "", "tags": [], "updated_at": ""})
+    return {"success": True, "note": item}
+
+
+@app.post("/api/sales/note")
+async def save_sales_note(req: SalesNoteRequest):
+    notes = _load_notes()
+    item = notes.get(req.customer_id, {"note": "", "tags": [], "updated_at": ""})
+
+    if req.note is not None:
+        item["note"] = req.note[:2000]
+    if req.add_tag:
+        tag = req.add_tag.strip()
+        if tag and tag not in item["tags"]:
+            item["tags"].append(tag)
+    if req.remove_tag:
+        item["tags"] = [t for t in item.get("tags", []) if t != req.remove_tag]
+
+    item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    notes[req.customer_id] = item
+    _save_notes(notes)
+    return {"success": True, "note": item}
+
+
+# ============================================================
+# ★ 快捷话术
+# ============================================================
+@app.get("/api/sales/quick-replies")
+async def get_quick_replies():
+    """快捷话术模板"""
+    return {
+        "success": True,
+        "groups": [
+            {
+                "id": "after_sales",
+                "name": "售后安抚",
+                "icon": "🛡️",
+                "items": [
+                    "非常抱歉给您带来不便！我马上帮您处理，请把破损的地方拍照发我看看～",
+                    "别着急，我们支持7天无理由退换，运费我们承担，马上给您安排。",
+                    "已经给您登记补发，48小时内发货，给您添麻烦了，实在抱歉。"
+                ]
+            },
+            {
+                "id": "promote",
+                "name": "促单话术",
+                "icon": "🚀",
+                "items": [
+                    "这款今天下单还有小礼品赠送哦，库存只剩最后几件啦～",
+                    "老客户专享9折，我帮您留一件，您现在拍就行。",
+                    "满200减30的券可以叠加使用，非常划算，要帮您下单吗？"
+                ]
+            },
+            {
+                "id": "logistics",
+                "name": "物流说明",
+                "icon": "🚚",
+                "items": [
+                    "默认中通/圆通，2-3天送达，需要顺丰可补差价¥10。",
+                    "下单后24小时内发货，节假日顺延，请留意物流通知。",
+                    "偏远地区可能多1-2天，请耐心等待～"
+                ]
+            },
+            {
+                "id": "common",
+                "name": "通用",
+                "icon": "💬",
+                "items": [
+                    "您好，请问有什么可以帮您的吗？",
+                    "稍等，我帮您查一下～",
+                    "感谢您的支持，有任何问题随时找我！"
+                ]
+            }
+        ]
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
