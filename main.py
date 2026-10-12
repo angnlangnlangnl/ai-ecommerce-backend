@@ -80,6 +80,14 @@ SESSION_CLEANUP_INTERVAL = 1800
 COUPON_FILE = Path(os.getenv("COUPON_FILE", "coupons.json")).resolve()
 CARD_CLICK_FILE = Path(os.getenv("CARD_CLICK_FILE", "card_clicks.json")).resolve()
 
+# ============================================================
+# ★ 方案 C：生成会话持久化 目录配置
+# ============================================================
+GEN_SESSION_DIR = Path(os.getenv("GEN_SESSION_DIR", "gen_sessions")).resolve()
+GEN_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+GEN_SESSION_TTL = int(os.getenv("GEN_SESSION_TTL", 7 * 24 * 3600))  # 默认 7 天
+GEN_SESSION_MAX = 200  # 最多保留 200 个会话
+
 
 def get_public_base_url(request: Request) -> str:
     env_url = os.getenv("PUBLIC_BASE_URL", "").strip()
@@ -94,6 +102,84 @@ def get_public_base_url(request: Request) -> str:
     if base.startswith("http://") and "localhost" not in base and "127.0.0.1" not in base:
         base = "https://" + base[len("http://"):]
     return base
+
+
+# ============================================================
+# ★ 方案 C：生成会话持久化 工具函数
+# ============================================================
+import re as _re
+
+def _safe_session_id(sid: str) -> str:
+    """只保留字母数字和 _-，防路径穿越"""
+    if not sid:
+        return ""
+    return _re.sub(r"[^a-zA-Z0-9_\-]", "", sid)[:64]
+
+
+def _gen_session_path(sid: str) -> Optional[Path]:
+    safe = _safe_session_id(sid)
+    if not safe:
+        return None
+    return GEN_SESSION_DIR / f"{safe}.json"
+
+
+def _load_gen_session(sid: str) -> Optional[dict]:
+    p = _gen_session_path(sid)
+    if not p or not p.exists():
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # 过期检查
+        if time.time() - data.get("updated_at", 0) > GEN_SESSION_TTL:
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+        return data
+    except Exception as e:
+        print(f"[_load_gen_session] {sid} 失败: {e}")
+        return None
+
+
+def _save_gen_session(sid: str, payload: dict) -> bool:
+    p = _gen_session_path(sid)
+    if not p:
+        return False
+    payload["updated_at"] = time.time()
+    payload["session_id"] = sid
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[_save_gen_session] {sid} 失败: {e}")
+        return False
+
+
+def _cleanup_gen_sessions():
+    """清理过期 + 超量会话"""
+    try:
+        files = sorted(
+            GEN_SESSION_DIR.glob("*.json"),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )
+    except Exception:
+        return
+    now = time.time()
+    for i, fp in enumerate(files):
+        try:
+            # 超量
+            if i >= GEN_SESSION_MAX:
+                fp.unlink(missing_ok=True)
+                continue
+            # 过期
+            if now - fp.stat().st_mtime > GEN_SESSION_TTL:
+                fp.unlink(missing_ok=True)
+        except Exception:
+            continue
 
 
 # ============================================================
@@ -642,6 +728,17 @@ def save_card_clicks(data):
 async def lifespan(app: FastAPI):
     task1 = asyncio.create_task(_periodic_cleanup())
     task2 = asyncio.create_task(_periodic_session_cleanup())
+
+    # ★ 方案 C：生成会话定时清理
+    async def _gen_session_cleaner():
+        while True:
+            try:
+                _cleanup_gen_sessions()
+            except Exception as e:
+                print("[gen session cleanup] error:", e)
+            await asyncio.sleep(1800)
+    task3 = asyncio.create_task(_gen_session_cleaner())
+
     try:
         _rebuild_kb_vectors()
     except Exception as e:
@@ -649,6 +746,7 @@ async def lifespan(app: FastAPI):
     yield
     task1.cancel()
     task2.cancel()
+    task3.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -970,6 +1068,10 @@ def add_log(action_type: str, args: dict, result: str, success: bool):
         "recommend_products": "AI推荐商品",
         "analyze_image": "AI识别图片内容",
         "auto_replace_from_images": "一键识别并替换",
+        # ★ 方案 C
+        "gen_session_save": "保存生成会话",
+        "gen_session_load": "加载生成会话",
+        "gen_session_delete": "删除生成会话",
     }
     logs = load_logs()
     log_entry = {
@@ -1976,6 +2078,110 @@ async def track_card_click(req: TrackClickRequest):
 @app.get("/api/coupons")
 async def get_coupons():
     return {"coupons": load_coupons()}
+
+
+# ============================================================
+# ★ 方案 C：生成会话持久化 API
+# ============================================================
+class GenSessionSaveRequest(BaseModel):
+    session_id: Optional[str] = None
+    product_name: Optional[str] = ""
+    selected_types: Optional[List[str]] = None
+    image_count: Optional[int] = 5
+    current_platform: Optional[str] = "淘宝"
+    carousel_prompts: Optional[List[str]] = None
+    detail_prompts: Optional[List[dict]] = None
+    video_prompts: Optional[List[dict]] = None
+    images: Optional[List[dict]] = None
+    copy_versions: Optional[List[dict]] = None
+    detail_images: Optional[List[dict]] = None
+    video_url: Optional[str] = ""
+    image_ratio: Optional[str] = "1:1"
+    video_ratio: Optional[str] = "9:16"
+    platforms: Optional[List[str]] = None
+    video_analysis: Optional[dict] = None
+
+
+@app.post("/api/gen-session/save")
+async def gen_session_save(req: GenSessionSaveRequest):
+    sid = req.session_id or uuid.uuid4().hex[:16]
+    payload = {
+        "product_name": req.product_name or "",
+        "selected_types": req.selected_types or [],
+        "image_count": req.image_count or 5,
+        "current_platform": req.current_platform or "淘宝",
+        "carousel_prompts": req.carousel_prompts or [],
+        "detail_prompts": req.detail_prompts or [],
+        "video_prompts": req.video_prompts or [],
+        "images": req.images or [],
+        "copy_versions": req.copy_versions or [],
+        "detail_images": req.detail_images or [],
+        "video_url": req.video_url or "",
+        "image_ratio": req.image_ratio or "1:1",
+        "video_ratio": req.video_ratio or "9:16",
+        "platforms": req.platforms or [],
+        "video_analysis": req.video_analysis or None,
+        "created_at": time.time(),
+    }
+    ok = _save_gen_session(sid, payload)
+    if not ok:
+        return {"success": False, "message": "保存失败"}
+    try:
+        _cleanup_gen_sessions()
+    except Exception:
+        pass
+    add_log("gen_session_save", {"sid": sid, "product": req.product_name}, f"已保存会话 {sid}", True)
+    return {"success": True, "session_id": sid, "url": f"/api/gen-session/load?session_id={sid}"}
+
+
+@app.get("/api/gen-session/load")
+async def gen_session_load(session_id: str):
+    data = _load_gen_session(session_id)
+    if not data:
+        return {"success": False, "message": "会话不存在或已过期"}
+    add_log("gen_session_load", {"sid": session_id}, "加载成功", True)
+    return {"success": True, "session_id": session_id, "data": data}
+
+
+@app.post("/api/gen-session/delete")
+async def gen_session_delete(payload: dict):
+    sid = payload.get("session_id", "")
+    p = _gen_session_path(sid)
+    if p and p.exists():
+        try:
+            p.unlink(missing_ok=True)
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+    add_log("gen_session_delete", {"sid": sid}, "已删除", True)
+    return {"success": True}
+
+
+@app.get("/api/gen-session/list")
+async def gen_session_list(limit: int = 20):
+    try:
+        files = sorted(
+            GEN_SESSION_DIR.glob("*.json"),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )[:limit]
+    except Exception:
+        return {"success": True, "sessions": []}
+    out = []
+    for fp in files:
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            out.append({
+                "session_id": d.get("session_id", fp.stem),
+                "product_name": d.get("product_name", ""),
+                "image_count": len(d.get("images", [])),
+                "has_video": bool(d.get("video_url")),
+                "updated_at": d.get("updated_at", 0),
+                "updated_at_str": datetime.fromtimestamp(d.get("updated_at", 0)).strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        except Exception:
+            continue
+    return {"success": True, "sessions": out}
 
 
 # ============================================================
@@ -3712,14 +3918,20 @@ async def root():
     asset_meta = _load_assets_meta()
     coupons = load_coupons()
     clicks = load_card_clicks()
+    # ★ 统计生成会话数
+    try:
+        gen_session_count = len(list(GEN_SESSION_DIR.glob("*.json")))
+    except Exception:
+        gen_session_count = 0
     return {
         "status": "ok",
-        "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 商品卡片 + 优惠券 + 点击追踪 + 销售型 AI 客服 + 视频反解匹配）",
+        "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 商品卡片 + 优惠券 + 点击追踪 + 销售型 AI 客服 + 视频反解匹配 + 生成会话持久化）",
         "public_base_url": base_url_info,
         "AGNES_API_KEY_length": agnes_key_len,
         "sales_agent_available": SALES_AGENT_AVAILABLE,
         "total_products": len(products),
         "total_sessions": len(sessions_store),
+        "total_gen_sessions": gen_session_count,
         "total_knowledge": len(kb_meta.get("items", [])),
         "total_assets": len(asset_meta.get("items", [])),
         "total_coupons": len(coupons),
@@ -3755,6 +3967,8 @@ async def root():
             "★ AI 看图识内容（base64 中转）",
             "★ 一键识别并替换",
             "★ blob 兜底拒绝",
+            "★ 生成会话持久化（方案 C）",
+            "★ 生成会话列表 / 保存 / 加载 / 删除",
         ]
     }
 
