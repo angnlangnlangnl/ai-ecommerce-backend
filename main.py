@@ -49,10 +49,20 @@ TEMP_ALLOWED_IMAGE = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 TEMP_ALLOWED_VIDEO = {"video/mp4", "video/webm", "video/quicktime"}
 TEMP_META_FILE = TEMP_UPLOAD_DIR / "_meta.json"
 
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads")).resolve()
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-for _sub in ("main", "sub", "video", "detail", "proxy"):
-    (UPLOAD_DIR / _sub).mkdir(parents=True, exist_ok=True)
+# ★ 改动 1：UPLOAD_DIR 默认 /data/uploads，挂载失败退回 uploads/
+UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/data/uploads")).resolve()
+try:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    for _sub in ("main", "sub", "video", "detail", "proxy"):
+        (UPLOAD_DIR / _sub).mkdir(parents=True, exist_ok=True)
+    print(f"[main] UPLOAD_DIR = {UPLOAD_DIR}")
+except Exception as _e:
+    print(f"[main] /data/uploads 挂载失败 ({_e})，退回 uploads/")
+    UPLOAD_DIR = Path("uploads").resolve()
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    for _sub in ("main", "sub", "video", "detail", "proxy"):
+        (UPLOAD_DIR / _sub).mkdir(parents=True, exist_ok=True)
+    print(f"[main] UPLOAD_DIR = {UPLOAD_DIR}")
 
 KB_DIR = Path(os.getenv("KB_DIR", "knowledge_base")).resolve()
 KB_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,6 +112,29 @@ def get_public_base_url(request: Request) -> str:
     if base.startswith("http://") and "localhost" not in base and "127.0.0.1" not in base:
         base = "https://" + base[len("http://"):]
     return base
+
+
+# ============================================================
+# ★ 改动 2：新增 _file_to_data_url 工具函数
+# ============================================================
+def _file_to_data_url(file_path: Path, mime: str = None) -> str:
+    """把本地文件转成 dataURL，用于返回给前端兜底"""
+    try:
+        if not file_path.exists():
+            return ""
+        content = file_path.read_bytes()
+        if not mime:
+            ext = file_path.suffix.lower()
+            mime = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp", ".gif": "image/gif",
+                ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime"
+            }.get(ext, "application/octet-stream")
+        b64 = base64.b64encode(content).decode()
+        return f"data:{mime};base64,{b64}"
+    except Exception as e:
+        print(f"[_file_to_data_url] 失败: {e}")
+        return ""
 
 
 # ============================================================
@@ -810,6 +843,7 @@ async def debug_env():
         "DEEPSEEK_API_KEY": mask(deepseek_key),
         "DEEPSEEK_API_KEY_length": len(deepseek_key),
         "PUBLIC_BASE_URL": public_url or "(未设置)",
+        "UPLOAD_DIR": str(UPLOAD_DIR),
         "sales_agent_available": SALES_AGENT_AVAILABLE
     }
 
@@ -1300,8 +1334,10 @@ async def agnes_generate_image(req: AgnesImageRequest, request: Request):
 
     base_url = get_public_base_url(request)
     public_url = f"{base_url}/uploads/proxy/{file_id}{ext}"
+    # ★ 改动 3：同时返回 base64，前端可存进 state，URL 过期也不怕
+    data_url = _file_to_data_url(file_path, "image/png" if ext == ".png" else None)
     add_log("agnes_generate_image", {"prompt": req.prompt[:50]}, f"已生成 {public_url}", True)
-    return {"success": True, "url": public_url}
+    return {"success": True, "url": public_url, "data_url": data_url}
 
 
 @app.post("/api/agnes/generate-video")
@@ -1399,8 +1435,15 @@ async def agnes_generate_video(req: AgnesVideoRequest, request: Request):
 
             base_url = get_public_base_url(request)
             public_url = f"{base_url}/uploads/proxy/{file_id}.mp4"
+            # ★ 改动 4：视频体积大，base64 只在前端 5MB 以内时返回
+            data_url = ""
+            try:
+                if file_path.stat().st_size < 5 * 1024 * 1024:
+                    data_url = _file_to_data_url(file_path, "video/mp4")
+            except Exception:
+                pass
             add_log("agnes_generate_video", {"prompt": req.prompt[:50]}, f"已生成 {public_url}", True)
-            return {"success": True, "url": public_url}
+            return {"success": True, "url": public_url, "data_url": data_url}
 
         if status == "failed":
             err = qd.get("error") or "未知错误"
@@ -1445,8 +1488,9 @@ async def proxy_image(req: ProxyMediaRequest, request: Request):
         f.write(content)
     base_url = get_public_base_url(request)
     public_url = f"{base_url}/uploads/proxy/{file_id}{ext}"
+    data_url = _file_to_data_url(file_path, None)
     add_log("proxy_image", {"source": req.media_url[:80]}, f"已代理到 {public_url}", True)
-    return {"success": True, "url": public_url, "size": len(content)}
+    return {"success": True, "url": public_url, "data_url": data_url, "size": len(content)}
 
 
 @app.post("/api/proxy/video")
@@ -1477,8 +1521,14 @@ async def proxy_video(req: ProxyMediaRequest, request: Request):
         f.write(content)
     base_url = get_public_base_url(request)
     public_url = f"{base_url}/uploads/proxy/{file_id}{ext}"
+    data_url = ""
+    try:
+        if file_path.stat().st_size < 5 * 1024 * 1024:
+            data_url = _file_to_data_url(file_path, None)
+    except Exception:
+        pass
     add_log("proxy_video", {"source": req.media_url[:80]}, f"已代理到 {public_url}", True)
-    return {"success": True, "url": public_url, "size": len(content)}
+    return {"success": True, "url": public_url, "data_url": data_url, "size": len(content)}
 
 
 # ============================================================
@@ -3927,6 +3977,7 @@ async def root():
         "status": "ok",
         "message": "AI 助手后端服务运行中（含知识库 + 资产库 + 商品卡片 + 优惠券 + 点击追踪 + 销售型 AI 客服 + 视频反解匹配 + 生成会话持久化）",
         "public_base_url": base_url_info,
+        "UPLOAD_DIR": str(UPLOAD_DIR),
         "AGNES_API_KEY_length": agnes_key_len,
         "sales_agent_available": SALES_AGENT_AVAILABLE,
         "total_products": len(products),
@@ -3969,6 +4020,8 @@ async def root():
             "★ blob 兜底拒绝",
             "★ 生成会话持久化（方案 C）",
             "★ 生成会话列表 / 保存 / 加载 / 删除",
+            "★ 图片/视频持久化（UPLOAD_DIR 挂 Volume）",
+            "★ 图片/视频 base64 兜底返回",
         ]
     }
 
