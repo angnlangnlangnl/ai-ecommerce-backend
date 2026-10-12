@@ -9,3 +9,4 @@ pdfplumber
 python-docx
 numpy
 scikit-learn
+opencv-python-headless
